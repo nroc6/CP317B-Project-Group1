@@ -1,0 +1,6 @@
+{
+  "name": "Basket - Ontario Farmers' Market Pre-Order",
+  "description": "Pre-order fresh local produce and artisanal goods from Ontario farmers' markets. Reserve online, pay in person at pickup.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
