@@ -4,191 +4,227 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getStoredOrders, saveStoredOrders } from '../data.js';
+import { supabase, isSupabaseConfigured, apiRequest } from '../lib/supabase.js';
 
 const AuthContext = createContext(null);
 
-const STORAGE_KEYS = {
-  USER: 'basket_auth_user',
-  CART: 'basket_cart_items',
-  FAVOURITES: 'basket_favourites',
-};
-
-// Default pre-seeded demo accounts
-const DEMO_ACCOUNTS = [
-  {
-    email: 'customer@basket.ca',
-    password: 'demo1234',
-    firstName: 'Claire',
-    lastName: 'Dubois',
-    role: 'customer',
-    city: 'Kitchener',
-    createdAt: '2026-04-10',
-    isApproved: true,
-  },
-  {
-    email: 'vendor@basket.ca',
-    password: 'demo1234',
-    firstName: 'Eli & Sarah',
-    lastName: 'Martin',
-    role: 'vendor',
-    vendorId: 'v-harvest-table',
-    vendorName: 'Harvest Table Organics',
-    marketId: 'st-jacobs',
-    marketName: "St. Jacobs Farmers' Market",
-    city: 'Woolwich',
-    createdAt: '2026-01-15',
-    isApproved: true,
-  },
-];
+const CART_STORAGE_KEY = 'basket_cart_items';
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEYS.USER);
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [session, setSession] = useState(null);
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [orders, setOrders] = useState([]);
+  const [favourites, setFavourites] = useState([]);
 
+  // Unsubmitted shopping cart remains local until submitted to POST /api/orders
   const [cart, setCart] = useState(() => {
     try {
-      const stored = localStorage.getItem(STORAGE_KEYS.CART);
+      const stored = localStorage.getItem(CART_STORAGE_KEY);
       return stored ? JSON.parse(stored) : [];
     } catch {
       return [];
     }
   });
 
-  const [favourites, setFavourites] = useState(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEYS.FAVOURITES);
-      return stored ? JSON.parse(stored) : ['st-jacobs', 'v-harvest-table'];
-    } catch {
-      return ['st-jacobs', 'v-harvest-table'];
-    }
-  });
-
-  const [orders, setOrders] = useState(() => getStoredOrders());
-
-  useEffect(() => {
-    const handleOrdersUpdate = () => {
-      setOrders(getStoredOrders());
-    };
-    window.addEventListener('basket_orders_updated', handleOrdersUpdate);
-    return () => window.removeEventListener('basket_orders_updated', handleOrdersUpdate);
-  }, []);
-
-  // Sync state to localStorage
   useEffect(() => {
     try {
-      if (user) {
-        localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
-      } else {
-        localStorage.removeItem(STORAGE_KEYS.USER);
-      }
-    } catch (e) {
-      console.error('Error persisting user', e);
-    }
-  }, [user]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.CART, JSON.stringify(cart));
+      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cart));
     } catch (e) {
       console.error('Error persisting cart', e);
     }
   }, [cart]);
 
+  const hydrateAuthenticatedState = useCallback(async (activeSession) => {
+    if (!activeSession?.access_token) {
+      setUser(null);
+      setOrders([]);
+      setFavourites([]);
+      return null;
+    }
+
+    const token = activeSession.access_token;
+    const [meRes, ordersRes, favsRes] = await Promise.all([
+      apiRequest('/api/me', {}, token),
+      apiRequest('/api/orders', {}, token).catch(() => ({ orders: [] })),
+      apiRequest('/api/favourites', {}, token).catch(() => ({ favourites: [] })),
+    ]);
+
+    setUser(meRes.user || null);
+    setOrders(ordersRes.orders || []);
+    setFavourites(favsRes.favourites || []);
+    return meRes.user || null;
+  }, []);
+
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.FAVOURITES, JSON.stringify(favourites));
-    } catch (e) {
-      console.error('Error persisting favourites', e);
-    }
-  }, [favourites]);
-
-  // Auth actions
-  const login = useCallback(async (email, password) => {
-    const normalizedEmail = email.trim().toLowerCase();
-    
-    // Check known demo accounts first
-    const foundDemo = DEMO_ACCOUNTS.find(
-      (a) => a.email.toLowerCase() === normalizedEmail && a.password === password
-    );
-
-    if (foundDemo) {
-      const sessionUser = { ...foundDemo };
-      delete sessionUser.password;
-      setUser(sessionUser);
-      return { success: true, user: sessionUser };
+    if (!isSupabaseConfigured || !supabase) {
+      setAuthLoading(false);
+      return;
     }
 
-    // Check custom registered accounts stored in localStorage
-    try {
-      const registeredUsers = JSON.parse(localStorage.getItem('basket_registered_users') || '[]');
-      const foundCustom = registeredUsers.find(
-        (u) => u.email.toLowerCase() === normalizedEmail && u.password === password
-      );
-      if (foundCustom) {
-        const sessionUser = { ...foundCustom };
-        delete sessionUser.password;
-        setUser(sessionUser);
-        return { success: true, user: sessionUser };
+    let mounted = true;
+
+    supabase.auth
+      .getSession()
+      .then(async ({ data }) => {
+        if (!mounted) return;
+        setSession(data.session || null);
+        if (data.session) {
+          try {
+            await hydrateAuthenticatedState(data.session);
+          } catch (err) {
+            console.error('Failed to hydrate session profile:', err);
+          }
+        }
+      })
+      .finally(() => {
+        if (mounted) setAuthLoading(false);
+      });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession || null);
+      if (nextSession) {
+        hydrateAuthenticatedState(nextSession).catch((err) => {
+          console.error('Failed to refresh actor state:', err);
+        });
+      } else {
+        setUser(null);
+        setOrders([]);
+        setFavourites([]);
       }
-    } catch (e) {
-      console.error(e);
-    }
+    });
 
-    return { success: false, error: 'Invalid email or password. Use demo credentials shown below.' };
-  }, []);
-
-  const signup = useCallback(async ({ firstName, lastName, email, password, role }) => {
-    const normalizedEmail = email.trim().toLowerCase();
-    
-    const newUser = {
-      firstName: firstName.trim(),
-      lastName: lastName.trim(),
-      email: normalizedEmail,
-      password,
-      role: role || 'customer',
-      vendorId: role === 'vendor' ? 'v-custom-' + Date.now() : undefined,
-      vendorName: role === 'vendor' ? `${firstName}'s Farm Stand` : undefined,
-      marketId: 'st-jacobs',
-      isApproved: role !== 'vendor', // Vendors pending approval
-      createdAt: new Date().toISOString().split('T')[0],
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
     };
+  }, [hydrateAuthenticatedState]);
 
-    try {
-      const existing = JSON.parse(localStorage.getItem('basket_registered_users') || '[]');
-      if (existing.some((u) => u.email.toLowerCase() === normalizedEmail)) {
-        return { success: false, error: 'An account with this email already exists.' };
+  const accessToken = session?.access_token || null;
+
+  const refreshOrders = useCallback(async () => {
+    if (!accessToken) return [];
+    const data = await apiRequest('/api/orders', {}, accessToken);
+    setOrders(data.orders || []);
+    return data.orders || [];
+  }, [accessToken]);
+
+  const login = useCallback(
+    async (email, password) => {
+      if (!isSupabaseConfigured || !supabase) {
+        return {
+          success: false,
+          error: 'Supabase is not configured. Check your .env file.',
+        };
       }
-      existing.push(newUser);
-      localStorage.setItem('basket_registered_users', JSON.stringify(existing));
-    } catch (e) {
-      console.error(e);
+
+      const normalizedEmail = email.trim().toLowerCase();
+      let signInRes = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password,
+      });
+
+      // Automatically provision demo accounts in Supabase Auth if using demo credentials for the first time
+      if (
+        signInRes.error &&
+        (normalizedEmail === 'customer@basket.ca' || normalizedEmail === 'vendor@basket.ca')
+      ) {
+        try {
+          await apiRequest('/api/demo/ensure-accounts', { method: 'POST' });
+          signInRes = await supabase.auth.signInWithPassword({
+            email: normalizedEmail,
+            password,
+          });
+        } catch {
+          // Ignore bootstrap error and surface original sign-in error
+        }
+      }
+
+      if (signInRes.error || !signInRes.data.session) {
+        return {
+          success: false,
+          error: signInRes.error?.message || 'Invalid email or password.',
+        };
+      }
+
+      setSession(signInRes.data.session);
+      const actor = await hydrateAuthenticatedState(signInRes.data.session);
+      return { success: true, user: actor };
+    },
+    [hydrateAuthenticatedState]
+  );
+
+  const signup = useCallback(
+    async ({ firstName, lastName, email, password, role, vendorName }) => {
+      if (!isSupabaseConfigured || !supabase) {
+        return {
+          success: false,
+          error: 'Supabase is not configured. Check your .env file.',
+        };
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const { data, error } = await supabase.auth.signUp({
+        email: normalizedEmail,
+        password,
+        options: {
+          data: {
+            first_name: firstName.trim(),
+            last_name: lastName.trim(),
+            role: role === 'vendor' ? 'vendor' : 'customer',
+            vendor_name: vendorName ? vendorName.trim() : `${firstName.trim()}'s Farm Stand`,
+          },
+        },
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      if (!data.session) {
+        return {
+          success: true,
+          requiresEmailConfirmation: true,
+          user: null,
+        };
+      }
+
+      setSession(data.session);
+      const actor = await hydrateAuthenticatedState(data.session);
+      return { success: true, requiresEmailConfirmation: false, user: actor };
+    },
+    [hydrateAuthenticatedState]
+  );
+
+  const logout = useCallback(async () => {
+    if (supabase) {
+      await supabase.auth.signOut();
     }
-
-    const sessionUser = { ...newUser };
-    delete sessionUser.password;
-    setUser(sessionUser);
-    return { success: true, user: sessionUser };
+    setSession(null);
+    setUser(null);
+    setOrders([]);
+    setFavourites([]);
   }, []);
 
-  const logout = useCallback(() => {
+  const deleteAccount = useCallback(async () => {
+    if (!accessToken) {
+      throw new Error('You must be signed in to delete your account.');
+    }
+    await apiRequest('/api/account', { method: 'DELETE' }, accessToken);
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+    setSession(null);
     setUser(null);
-  }, []);
-
-  const deleteAccount = useCallback(() => {
-    setUser(null);
+    setOrders([]);
+    setFavourites([]);
     setCart([]);
-    localStorage.removeItem(STORAGE_KEYS.USER);
-    localStorage.removeItem(STORAGE_KEYS.CART);
-  }, []);
+    localStorage.removeItem(CART_STORAGE_KEY);
+  }, [accessToken]);
 
-  // Cart actions
+  // Client-side unsubmitted cart operations
   const addToCart = useCallback((product, vendor, market, quantity = 1) => {
     setCart((prev) => {
       const existingIndex = prev.findIndex((item) => item.productId === product.id);
@@ -203,7 +239,7 @@ export function AuthProvider({ children }) {
       return [
         ...prev,
         {
-          id: 'cart-item-' + Date.now() + Math.random().toString(36).substr(2, 4),
+          id: 'cart-item-' + Date.now() + Math.random().toString(36).slice(2, 6),
           productId: product.id,
           name: product.name,
           price: product.price,
@@ -220,86 +256,105 @@ export function AuthProvider({ children }) {
     });
   }, []);
 
-  const updateCartQuantity = useCallback((cartItemId, quantity) => {
-    if (quantity <= 0) {
-      removeFromCart(cartItemId);
-      return;
-    }
-    setCart((prev) =>
-      prev.map((item) => (item.id === cartItemId ? { ...item, quantity } : item))
-    );
-  }, []);
-
   const removeFromCart = useCallback((cartItemId) => {
     setCart((prev) => prev.filter((item) => item.id !== cartItemId));
   }, []);
+
+  const updateCartQuantity = useCallback(
+    (cartItemId, quantity) => {
+      if (quantity <= 0) {
+        removeFromCart(cartItemId);
+        return;
+      }
+      setCart((prev) =>
+        prev.map((item) => (item.id === cartItemId ? { ...item, quantity } : item))
+      );
+    },
+    [removeFromCart]
+  );
 
   const clearCart = useCallback(() => {
     setCart([]);
   }, []);
 
-  // Pre-order submission (Always Pay in Person at Pickup)
-  const placePreOrder = useCallback(({ pickupWindow, customerNote }) => {
-    if (cart.length === 0) return null;
-
-    // Group cart items by vendor/market to generate friendly orders
-    const ordersByVendor = {};
-    cart.forEach((item) => {
-      if (!ordersByVendor[item.vendorId]) {
-        ordersByVendor[item.vendorId] = {
-          vendorId: item.vendorId,
-          vendorName: item.vendorName,
-          marketId: item.marketId,
-          marketName: item.marketName,
-          items: [],
-          total: 0,
-        };
+  // Authoritative server-side pre-order creation (computes prices & splits by vendor)
+  const placePreOrder = useCallback(
+    async ({ pickupWindow, customerNote }) => {
+      if (cart.length === 0) return null;
+      if (!accessToken) {
+        throw new Error('Please log in to place a pre-order.');
       }
-      ordersByVendor[item.vendorId].items.push({
-        id: item.productId,
-        name: item.name,
-        quantity: item.quantity,
-        price: item.price,
-        unit: item.unit,
+
+      const payload = {
+        pickupWindow,
+        customerNote,
+        items: cart.map((item) => ({
+          productId: item.productId,
+          quantity: item.quantity,
+        })),
+      };
+
+      const res = await apiRequest(
+        '/api/orders',
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        },
+        accessToken
+      );
+
+      const created = res.orders || [];
+      setOrders((prev) => [...created, ...prev]);
+      clearCart();
+      return created;
+    },
+    [cart, accessToken, clearCart]
+  );
+
+  const transitionOrderStatus = useCallback(
+    async (orderId, targetStatus) => {
+      if (!accessToken) {
+        throw new Error('Authentication required.');
+      }
+      const res = await apiRequest(
+        `/api/orders/${encodeURIComponent(orderId)}/status`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ status: targetStatus }),
+        },
+        accessToken
+      );
+      const updated = res.order;
+      setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+      return updated;
+    },
+    [accessToken]
+  );
+
+  // Authenticated favourites toggle
+  const toggleFavourite = useCallback(
+    async (targetId, targetType = 'market') => {
+      if (!accessToken) {
+        throw new Error('Please log in to save favourites.');
+      }
+      const res = await apiRequest(
+        '/api/favourites/toggle',
+        {
+          method: 'POST',
+          body: JSON.stringify({ targetType, targetId }),
+        },
+        accessToken
+      );
+      setFavourites((prev) => {
+        if (res.saved) {
+          return prev.includes(targetId) ? prev : [...prev, targetId];
+        }
+        return prev.filter((id) => id !== targetId);
       });
-      ordersByVendor[item.vendorId].total += item.price * item.quantity;
-    });
-
-    const newOrders = Object.values(ordersByVendor).map((group, idx) => ({
-      id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
-      date: new Date().toISOString().split('T')[0],
-      customerEmail: user?.email || 'guest@basket.ca',
-      customerName: user ? `${user.firstName} ${user.lastName}` : 'Guest Customer',
-      vendorId: group.vendorId,
-      vendorName: group.vendorName,
-      marketId: group.marketId,
-      marketName: group.marketName,
-      pickupWindow: pickupWindow || 'Saturday, 9:00 AM – 11:00 AM',
-      customerNote: customerNote || '',
-      items: group.items,
-      total: group.total,
-      status: 'Awaiting Pickup (Pay in Person)',
-      paymentMethod: 'Pay in person at pickup (Cash, Debit, or e-Transfer)',
-    }));
-
-    const currentOrders = getStoredOrders();
-    const updatedOrders = [...newOrders, ...currentOrders];
-    saveStoredOrders(updatedOrders);
-    setOrders(updatedOrders);
-    clearCart();
-
-    return newOrders;
-  }, [cart, user, clearCart]);
-
-  // Favourites actions
-  const toggleFavourite = useCallback((id) => {
-    setFavourites((prev) => {
-      if (prev.includes(id)) {
-        return prev.filter((item) => item !== id);
-      }
-      return [...prev, id];
-    });
-  }, []);
+      return res.saved;
+    },
+    [accessToken]
+  );
 
   const isFavourite = useCallback((id) => favourites.includes(id), [favourites]);
 
@@ -310,6 +365,10 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider
       value={{
         user,
+        session,
+        accessToken,
+        authLoading,
+        isSupabaseConfigured,
         isAuthenticated: !!user,
         isVendor: user?.role === 'vendor',
         isCustomer: user?.role === 'customer',
@@ -327,6 +386,8 @@ export function AuthProvider({ children }) {
         removeFromCart,
         clearCart,
         placePreOrder,
+        refreshOrders,
+        transitionOrderStatus,
         toggleFavourite,
         isFavourite,
       }}

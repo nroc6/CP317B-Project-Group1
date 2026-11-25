@@ -9,7 +9,7 @@ import { ShoppingBag, ShieldCheck, MapPin, Store, Lock, Heart, CheckCircle2 } fr
 import { useAuth } from '../context/AuthContext.jsx';
 
 export default function Footer() {
-  const { isVendor } = useAuth();
+  const { isSupabaseConfigured } = useAuth();
 
   return (
     <footer className="bg-[#22442A] text-[#FAF6EE] mt-16 border-t border-[#2F5D3A]">
@@ -114,8 +114,8 @@ export default function Footer() {
             </div>
             <div className="pt-2">
               <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/30 border border-[#FAF6EE]/10 text-xs text-[#FAF6EE]/80">
-                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-                <span>Demo mode: Active</span>
+                <span className={`w-2 h-2 rounded-full ${isSupabaseConfigured ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+                <span>{isSupabaseConfigured ? 'Supabase: Connected' : 'Supabase: Setup Required'}</span>
               </div>
             </div>
           </div>

@@ -5,18 +5,21 @@
 
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ShoppingBag, Lock, Mail, User, ArrowRight, Store, AlertCircle, Info } from 'lucide-react';
+import { ShoppingBag, Lock, Mail, User, ArrowRight, Store, AlertCircle, Info, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
 export default function Signup() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
+  const [vendorName, setVendorName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [role, setRole] = useState('customer'); // 'customer' or 'vendor'
   const [errorMsg, setErrorMsg] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [confirmationEmail, setConfirmationEmail] = useState('');
 
   const { signup } = useAuth();
   const { addToast } = useToast();
@@ -24,6 +27,7 @@ export default function Signup() {
 
   const handleSignup = async (e) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setErrorMsg('');
 
     // Validation
@@ -47,8 +51,24 @@ export default function Signup() {
       return;
     }
 
-    const res = await signup({ firstName, lastName, email, password, role });
+    setIsSubmitting(true);
+    const res = await signup({
+      firstName,
+      lastName,
+      email,
+      password,
+      role,
+      vendorName: role === 'vendor' ? vendorName : undefined,
+    });
+    setIsSubmitting(false);
+
     if (res.success) {
+      if (res.requiresEmailConfirmation) {
+        setConfirmationEmail(email.trim().toLowerCase());
+        addToast('Check your email to confirm your Basket account.', 'info', 6000);
+        return;
+      }
+
       if (role === 'vendor') {
         addToast('Vendor registration submitted! Application is pending admin approval.', 'info', 5000);
         navigate('/dashboard');
@@ -60,6 +80,30 @@ export default function Signup() {
       setErrorMsg(res.error || 'Failed to create account.');
     }
   };
+
+  if (confirmationEmail) {
+    return (
+      <div className="min-h-[75vh] flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md bg-white rounded-3xl p-8 border-2 border-[#2F5D3A]/20 shadow-md text-center space-y-4">
+          <div className="w-12 h-12 rounded-full bg-emerald-100 text-[#2F5D3A] flex items-center justify-center mx-auto">
+            <CheckCircle2 className="w-6 h-6" />
+          </div>
+          <h1 className="font-display text-2xl font-bold text-[#2F5D3A]">Confirm Your Email</h1>
+          <p className="text-xs text-stone-600 leading-relaxed">
+            We sent a confirmation link to <strong className="text-[#232323]">{confirmationEmail}</strong>.
+            Open the link to activate your account, then sign in.
+          </p>
+          <Link
+            to="/login"
+            className="inline-flex items-center justify-center gap-2 w-full py-3 px-4 rounded-xl bg-[#2F5D3A] text-[#FAF6EE] font-bold text-xs hover:bg-[#22442A] transition-colors"
+          >
+            <span>Go to Sign In</span>
+            <ArrowRight className="w-4 h-4" />
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-[75vh] flex items-center justify-center px-4 py-12">
@@ -114,7 +158,7 @@ export default function Signup() {
               <span>Pending Admin Approval</span>
             </div>
             <p className="text-stone-600 text-[11px] leading-relaxed">
-              Vendor accounts require verification to ensure authentic Ontario farm provenance. You will have immediate demo dashboard access while your booth is verified.
+              Vendor accounts require verification to ensure authentic Ontario farm provenance. Publishing products unlocks once an administrator approves your farm stand in Supabase.
             </p>
           </div>
         )}
@@ -157,6 +201,21 @@ export default function Signup() {
               />
             </div>
           </div>
+
+          {role === 'vendor' && (
+            <div>
+              <label className="block text-xs font-semibold text-stone-700 mb-1">
+                Farm Stand / Business Name
+              </label>
+              <input
+                type="text"
+                value={vendorName}
+                onChange={(e) => setVendorName(e.target.value)}
+                placeholder="e.g. Elmira Heritage Gardens"
+                className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
+              />
+            </div>
+          )}
 
           <div>
             <label className="block text-xs font-semibold text-stone-700 mb-1">
@@ -213,9 +272,14 @@ export default function Signup() {
 
           <button
             type="submit"
-            className="w-full py-3 px-4 rounded-xl bg-[#2F5D3A] text-[#FAF6EE] font-bold text-xs hover:bg-[#22442A] transition-all flex items-center justify-center gap-2 shadow-xs"
+            disabled={isSubmitting}
+            className="w-full py-3 px-4 rounded-xl bg-[#2F5D3A] text-[#FAF6EE] font-bold text-xs hover:bg-[#22442A] transition-all flex items-center justify-center gap-2 shadow-xs disabled:opacity-60"
           >
-            <span>Create {role === 'vendor' ? 'Vendor' : 'Customer'} Account</span>
+            <span>
+              {isSubmitting
+                ? 'Creating Account...'
+                : `Create ${role === 'vendor' ? 'Vendor' : 'Customer'} Account`}
+            </span>
             <ArrowRight className="w-4 h-4" />
           </button>
 

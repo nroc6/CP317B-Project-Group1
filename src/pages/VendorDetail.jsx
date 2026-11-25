@@ -5,126 +5,200 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { 
-  Store, 
-  MapPin, 
-  Star, 
-  Heart, 
-  ShoppingBag, 
-  ArrowLeft, 
-  CheckCircle2, 
-  Clock, 
-  Filter,
+import {
+  Store,
+  MapPin,
+  Star,
+  Heart,
+  ShoppingBag,
+  ArrowLeft,
+  CheckCircle2,
   MessageSquare,
   ShieldCheck,
-  Send
+  Send,
+  AlertCircle,
 } from 'lucide-react';
-import { 
-  INITIAL_VENDORS, 
-  INITIAL_MARKETS, 
-  getStoredProducts, 
-  getStoredReviews, 
-  saveStoredReviews 
-} from '../data.js';
+import { fetchVendorDetail } from '../data.js';
+import { apiRequest } from '../lib/supabase.js';
 import ProductCard from '../components/ProductCard.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
 export default function VendorDetail() {
   const { id } = useParams();
-  const { user, isFavourite, toggleFavourite, orders } = useAuth();
+  const { isAuthenticated, accessToken, isFavourite, toggleFavourite, orders } = useAuth();
   const { addToast } = useToast();
 
-  const [products, setProducts] = useState(() => getStoredProducts());
-  const [reviews, setReviews] = useState(() => getStoredReviews());
+  const [vendor, setVendor] = useState(null);
+  const [market, setMarket] = useState(null);
+  const [products, setProducts] = useState([]);
+  const [reviews, setReviews] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
 
-  // Review submission state
   const [showReviewForm, setShowReviewForm] = useState(false);
+  const [selectedOrderId, setSelectedOrderId] = useState('');
   const [newRating, setNewRating] = useState(5);
   const [newComment, setNewComment] = useState('');
+  const [submittingReview, setSubmittingReview] = useState(false);
 
-  // Keep products in sync with any edits from Vendor Dashboard
   useEffect(() => {
-    const handleUpdate = () => {
-      setProducts(getStoredProducts());
-    };
-    window.addEventListener('basket_products_updated', handleUpdate);
-    return () => window.removeEventListener('basket_products_updated', handleUpdate);
-  }, []);
+    let active = true;
+    setLoading(true);
+    setErrorMsg('');
 
-  const vendor = useMemo(() => {
-    return INITIAL_VENDORS.find((v) => v.id === id) || INITIAL_VENDORS[0];
+    fetchVendorDetail(id)
+      .then((res) => {
+        if (!active) return;
+        if (!res) {
+          setErrorMsg('Vendor stall not found.');
+          return;
+        }
+        setVendor(res.vendor);
+        setMarket(res.market);
+        setProducts(res.products);
+        setReviews(res.reviews);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setErrorMsg(err.message || 'Failed to load vendor stall.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
   }, [id]);
 
-  const market = useMemo(() => {
-    return INITIAL_MARKETS.find((m) => m.id === vendor.marketId) || INITIAL_MARKETS[0];
-  }, [vendor]);
+  // Eligible completed orders by the signed-in user that haven't been reviewed yet
+  const eligibleOrders = useMemo(() => {
+    if (!vendor || !isAuthenticated) return [];
+    const reviewedOrderIds = new Set(reviews.map((r) => r.orderId).filter(Boolean));
+    return orders.filter(
+      (o) =>
+        o.vendorId === vendor.id &&
+        o.status === 'completed' &&
+        !reviewedOrderIds.has(o.id)
+    );
+  }, [orders, reviews, vendor, isAuthenticated]);
 
-  // Inventory for this specific vendor
-  const vendorProducts = useMemo(() => {
-    return products.filter((p) => p.vendorId === vendor.id);
-  }, [products, vendor]);
+  useEffect(() => {
+    if (eligibleOrders.length > 0 && !selectedOrderId) {
+      setSelectedOrderId(eligibleOrders[0].id);
+    }
+  }, [eligibleOrders, selectedOrderId]);
 
   const categories = useMemo(() => {
-    const cats = ['all', ...Array.from(new Set(vendorProducts.map((p) => p.category || 'General')))];
-    return cats;
-  }, [vendorProducts]);
+    return ['all', ...Array.from(new Set(products.map((p) => p.category || 'General')))];
+  }, [products]);
 
   const filteredProducts = useMemo(() => {
-    if (selectedCategory === 'all') return vendorProducts;
-    return vendorProducts.filter((p) => p.category === selectedCategory);
-  }, [vendorProducts, selectedCategory]);
+    if (selectedCategory === 'all') return products;
+    return products.filter((p) => p.category === selectedCategory);
+  }, [products, selectedCategory]);
 
-  // Reviews for this vendor
-  const vendorReviews = useMemo(() => {
-    return reviews.filter((r) => r.vendorId === vendor.id);
-  }, [reviews, vendor]);
+  const isFav = vendor ? isFavourite(vendor.id) : false;
 
-  const isFav = isFavourite(vendor.id);
-
-  const handleToggleFav = () => {
-    toggleFavourite(vendor.id);
-    addToast(isFav ? `Removed ${vendor.name} from favourites` : `Added ${vendor.name} to favourites!`);
+  const handleToggleFav = async () => {
+    if (!vendor) return;
+    if (!isAuthenticated) {
+      addToast('Log in to save favourite stalls.', 'info');
+      return;
+    }
+    try {
+      const saved = await toggleFavourite(vendor.id, 'vendor');
+      addToast(saved ? `Added ${vendor.name} to favourites!` : `Removed ${vendor.name} from favourites`);
+    } catch (err) {
+      addToast(err.message || 'Could not update favourites.', 'error');
+    }
   };
 
-  // Submit new review
-  const handleAddReview = (e) => {
+  const handleAddReview = async (e) => {
     e.preventDefault();
+    if (!accessToken || !vendor) {
+      addToast('Please log in to leave a review.', 'info');
+      return;
+    }
+    if (!selectedOrderId) {
+      addToast('Reviews require a completed pickup order with this vendor.', 'error');
+      return;
+    }
     if (!newComment.trim()) {
       addToast('Please enter your review comments.', 'error');
       return;
     }
 
-    const reviewEntry = {
-      id: 'rev-' + Date.now(),
-      vendorId: vendor.id,
-      customerName: user ? `${user.firstName} ${user.lastName ? user.lastName[0] + '.' : ''}` : 'Verified Customer',
-      orderId: 'ORD-' + Math.floor(1000 + Math.random() * 9000),
-      verifiedOrder: true,
-      date: 'Just now',
-      rating: newRating,
-      comment: newComment.trim(),
-    };
+    setSubmittingReview(true);
+    try {
+      const res = await apiRequest(
+        '/api/reviews',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            vendorId: vendor.id,
+            orderId: selectedOrderId,
+            rating: newRating,
+            comment: newComment.trim(),
+          }),
+        },
+        accessToken
+      );
 
-    const updated = [reviewEntry, ...reviews];
-    saveStoredReviews(updated);
-    setReviews(updated);
-    setNewComment('');
-    setShowReviewForm(false);
-    addToast('Review submitted successfully! Thank you for supporting local growers.');
+      setReviews((prev) => [res.review, ...prev]);
+      setNewComment('');
+      setShowReviewForm(false);
+      addToast('Verified review published! Thank you for supporting local growers.');
+    } catch (err) {
+      addToast(err.message || 'Could not submit review.', 'error');
+    } finally {
+      setSubmittingReview(false);
+    }
   };
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        <div className="h-72 rounded-3xl bg-white border border-stone-200 animate-pulse" />
+        <div className="h-64 rounded-3xl bg-white border border-stone-200 animate-pulse" />
+      </div>
+    );
+  }
+
+  if (errorMsg || !vendor) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 py-12 text-center space-y-4">
+        <AlertCircle className="w-10 h-10 text-[#C96F4A] mx-auto" />
+        <h1 className="font-display text-2xl font-bold text-[#2F5D3A]">
+          {errorMsg || 'Vendor not found'}
+        </h1>
+        <Link
+          to="/"
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#2F5D3A] text-white text-xs font-bold"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to Markets</span>
+        </Link>
+      </div>
+    );
+  }
+
+  const avgRating =
+    reviews.length > 0
+      ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1)
+      : vendor.rating.toFixed(1);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
-      {/* Back button */}
       <div>
         <Link
-          to={`/markets/${market.id}`}
+          to={market ? `/markets/${market.id}` : '/'}
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-stone-600 hover:text-[#2F5D3A] transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          <span>Back to {market.name}</span>
+          <span>Back to {market ? market.name : 'Markets'}</span>
         </Link>
       </div>
 
@@ -139,7 +213,6 @@ export default function VendorDetail() {
           />
           <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent" />
 
-          {/* Top Actions */}
           <div className="absolute top-4 right-4">
             <button
               onClick={handleToggleFav}
@@ -154,7 +227,6 @@ export default function VendorDetail() {
             </button>
           </div>
 
-          {/* Vendor Details on Banner */}
           <div className="absolute bottom-6 left-6 right-6 text-white max-w-3xl">
             <div className="flex flex-wrap items-center gap-2 mb-2">
               <span className="px-3 py-0.5 rounded-full bg-[#C96F4A] text-white text-[11px] font-bold uppercase tracking-wider">
@@ -162,8 +234,8 @@ export default function VendorDetail() {
               </span>
               <div className="flex items-center gap-1 bg-white/20 backdrop-blur-md px-2.5 py-0.5 rounded-full text-xs font-bold text-white">
                 <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                <span>{vendor.rating.toFixed(1)}</span>
-                <span className="text-stone-300 font-normal">({vendorReviews.length} reviews)</span>
+                <span>{avgRating}</span>
+                <span className="text-stone-300 font-normal">({reviews.length} reviews)</span>
               </div>
             </div>
 
@@ -171,22 +243,24 @@ export default function VendorDetail() {
               {vendor.name}
             </h1>
 
-            {/* Clickable link to market attended */}
             <p className="flex items-center gap-1.5 text-xs sm:text-sm text-stone-200 mt-2">
               <MapPin className="w-4 h-4 text-[#C96F4A] shrink-0" />
               <span>Attending: </span>
-              <Link 
-                to={`/markets/${market.id}`} 
-                className="font-semibold text-white underline hover:text-[#FAF6EE]"
-              >
-                {market.name}
-              </Link>
+              {market ? (
+                <Link
+                  to={`/markets/${market.id}`}
+                  className="font-semibold text-white underline hover:text-[#FAF6EE]"
+                >
+                  {market.name}
+                </Link>
+              ) : (
+                <span className="font-semibold text-white">{vendor.marketName}</span>
+              )}
               <span className="text-stone-400">· {vendor.city}</span>
             </p>
           </div>
         </div>
 
-        {/* Vendor Bio & Pickup Instructions */}
         <div className="p-6 sm:p-8 grid grid-cols-1 md:grid-cols-3 gap-6 bg-[#FAF6EE]/40 border-t border-stone-100">
           <div className="md:col-span-2 space-y-3">
             <h3 className="font-display font-bold text-lg text-[#2F5D3A]">
@@ -205,9 +279,7 @@ export default function VendorDetail() {
               <Store className="w-4 h-4 text-[#C96F4A] shrink-0" />
               {vendor.stallLocation}
             </p>
-            <p className="text-xs text-stone-600 leading-relaxed">
-              {vendor.pickupInstructions}
-            </p>
+            <p className="text-xs text-stone-600 leading-relaxed">{vendor.pickupInstructions}</p>
             <div className="pt-1 text-[11px] font-medium text-stone-500">
               Payment: Cash, Debit, or e-Transfer at stall.
             </div>
@@ -227,7 +299,6 @@ export default function VendorDetail() {
             </p>
           </div>
 
-          {/* Category Tabs */}
           {categories.length > 2 && (
             <div className="flex items-center gap-1.5 p-1 bg-white rounded-xl border border-stone-200 overflow-x-auto">
               {categories.map((cat) => (
@@ -247,7 +318,6 @@ export default function VendorDetail() {
           )}
         </div>
 
-        {/* Product Cards Grid */}
         {filteredProducts.length > 0 ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
             {filteredProducts.map((product) => (
@@ -255,7 +325,7 @@ export default function VendorDetail() {
                 key={product.id}
                 product={product}
                 vendor={vendor}
-                market={market}
+                market={market || { id: vendor.marketId, name: vendor.marketName }}
               />
             ))}
           </div>
@@ -270,7 +340,7 @@ export default function VendorDetail() {
         )}
       </section>
 
-      {/* Reviews Section (Only from Completed Orders) */}
+      {/* Verified Completed-Order Reviews */}
       <section className="bg-white rounded-3xl p-6 sm:p-8 border border-[#2F5D3A]/15 shadow-xs space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-100">
           <div>
@@ -284,28 +354,52 @@ export default function VendorDetail() {
               </span>
             </div>
             <p className="text-xs text-stone-500 mt-1">
-              Average {vendor.rating.toFixed(1)} / 5.0 based on verified in-person pickup orders
+              Average {avgRating} / 5.0 based on verified in-person pickup orders
             </p>
           </div>
 
-          <button
-            onClick={() => setShowReviewForm(!showReviewForm)}
-            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-[#2F5D3A] text-[#FAF6EE] text-xs font-semibold hover:bg-[#22442A] transition-colors shadow-xs"
-          >
-            <MessageSquare className="w-3.5 h-3.5" />
-            <span>{showReviewForm ? 'Cancel' : 'Leave a Review'}</span>
-          </button>
+          {eligibleOrders.length > 0 ? (
+            <button
+              onClick={() => setShowReviewForm(!showReviewForm)}
+              className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-[#2F5D3A] text-[#FAF6EE] text-xs font-semibold hover:bg-[#22442A] transition-colors shadow-xs"
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span>{showReviewForm ? 'Cancel' : 'Leave a Review'}</span>
+            </button>
+          ) : (
+            <span className="text-xs text-stone-500 italic">
+              {isAuthenticated
+                ? 'Complete an in-person pickup order with this stall to leave a verified review.'
+                : 'Sign in after completing a pickup order to leave a verified review.'}
+            </span>
+          )}
         </div>
 
-        {/* Add Review Form */}
-        {showReviewForm && (
+        {showReviewForm && eligibleOrders.length > 0 && (
           <form
             onSubmit={handleAddReview}
-            className="p-5 rounded-2xl bg-[#FAF6EE] border border-[#2F5D3A]/20 space-y-4 animate-in fade-in duration-200"
+            className="p-5 rounded-2xl bg-[#FAF6EE] border border-[#2F5D3A]/20 space-y-4"
           >
             <h4 className="font-display font-bold text-sm text-[#2F5D3A]">
-              Write a Review for {vendor.name}
+              Write a Verified Review for {vendor.name}
             </h4>
+
+            <div>
+              <label className="block text-xs font-semibold text-stone-700 mb-1">
+                Completed Order
+              </label>
+              <select
+                value={selectedOrderId}
+                onChange={(e) => setSelectedOrderId(e.target.value)}
+                className="w-full p-2.5 text-xs bg-white border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
+              >
+                {eligibleOrders.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    #{o.id} · {o.date} (${o.total.toFixed(2)})
+                  </option>
+                ))}
+              </select>
+            </div>
 
             <div>
               <label className="block text-xs font-semibold text-stone-700 mb-1">
@@ -321,9 +415,7 @@ export default function VendorDetail() {
                   >
                     <Star
                       className={`w-6 h-6 transition-colors ${
-                        star <= newRating
-                          ? 'fill-amber-400 text-amber-400'
-                          : 'text-stone-300'
+                        star <= newRating ? 'fill-amber-400 text-amber-400' : 'text-stone-300'
                       }`}
                     />
                   </button>
@@ -351,23 +443,23 @@ export default function VendorDetail() {
             <div className="flex items-center justify-between text-[11px] text-stone-500">
               <span className="flex items-center gap-1">
                 <ShieldCheck className="w-3.5 h-3.5 text-[#2F5D3A]" />
-                Will be tagged as "Completed order (Paid at stall)"
+                Verified against order #{selectedOrderId}
               </span>
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#2F5D3A] text-white text-xs font-bold hover:bg-[#22442A]"
+                disabled={submittingReview}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#2F5D3A] text-white text-xs font-bold hover:bg-[#22442A] disabled:opacity-50"
               >
                 <Send className="w-3 h-3" />
-                <span>Post Review</span>
+                <span>{submittingReview ? 'Posting...' : 'Post Review'}</span>
               </button>
             </div>
           </form>
         )}
 
-        {/* Reviews List */}
         <div className="space-y-4">
-          {vendorReviews.length > 0 ? (
-            vendorReviews.map((rev) => (
+          {reviews.length > 0 ? (
+            reviews.map((rev) => (
               <div
                 key={rev.id}
                 className="p-5 rounded-2xl bg-[#FAF6EE]/50 border border-stone-100 space-y-2"
@@ -390,9 +482,7 @@ export default function VendorDetail() {
                     <Star
                       key={i}
                       className={`w-4 h-4 ${
-                        i < rev.rating
-                          ? 'fill-amber-400 text-amber-400'
-                          : 'text-stone-300'
+                        i < rev.rating ? 'fill-amber-400 text-amber-400' : 'text-stone-300'
                       }`}
                     />
                   ))}

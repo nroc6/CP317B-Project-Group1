@@ -2,128 +2,103 @@
 
 > **Document Status:** Actuality / Ground Truth.  
 > This specification describes the codebase **exactly as it is currently implemented**.  
-> For the aspirational target architecture, security hardening plan, and prioritized engineering to-do backlog, see [`ROADMAP.md`](./ROADMAP.md).
+> For completed milestones and remaining operational backlog, see [`ROADMAP.md`](./ROADMAP.md).
 
 ---
 
 ## Architecture Header Block
 
-1. **Trust boundary:** The application runs as a client-side React SPA in the browser. In the current prototype, there is no remote server API or database; all state and persistence are held directly in browser `localStorage`. Security and route gating are enforced via client React components and navigation hooks.
-2. **Method contract:** Data operations are implemented as exported helper functions on `src/data.js` and custom hooks/methods on `src/context/AuthContext.jsx`. State synchronization across disparate components is maintained through custom DOM window events (`basket_products_updated`, `basket_orders_updated`, `basket_reviews_updated`).
-3. **Entity relationships:** `User 1—0..* Order`, `User 1—0..* Favourite`, `Market 1—1..* Vendor`, `Vendor 1—0..* Product`, `Vendor 1—0..* Review`, `Order 1—1..* OrderItem`; multi-vendor cart checkouts partition items by vendor, producing $N$ distinct vendor orders.
+1. **Trust boundary:** The browser client (React SPA) is untrusted and has direct read-only access only to public catalog tables (`markets`, approved `vendors`, `products`, `reviews`) via the Supabase anon key protected by PostgreSQL Row Level Security (RLS). All authenticated mutations and private reads route through the trusted Express server (`server.ts`), which verifies the Supabase JWT (`Authorization: Bearer <token>`), resolves `actor`, validates input, and executes database writes using `SUPABASE_SERVICE_ROLE_KEY`.
+2. **Method contract:** Every server write method takes `actor` as its final parameter, verifies role and resource ownership inside the model method (`server/models/*.ts`), and computes server-derived fields (`id`, `customer_id`, `price_cents_snapshot`, `total_cents`, `status`, `customer_name`). Unsubmitted shopping cart state (`CartItem`) remains local in browser `localStorage` (`basket_cart_items`) until submitted to `POST /api/orders`.
+3. **Entity relationships:** `User 1—0..1 Vendor`, `User 1—0..* Order`, `User 1—0..* Favourite`, `Market 1—0..* Vendor`, `Vendor 1—0..* Product`, `Vendor 1—0..* Order`, `Vendor 1—0..* Review`, `Order 1—1..* OrderItem`, `Order 1—0..1 Review`; multi-vendor cart checkout splits items by `vendor_id` into $N$ distinct `Order` records.
 4. **File paths:**
-   - `User` → `src/context/AuthContext.jsx`
-   - `Market` → `src/data.js`
-   - `Vendor` → `src/data.js`
-   - `Product` → `src/data.js`
-   - `CartItem` → `src/context/AuthContext.jsx`
-   - `Order` → `src/data.js` / `src/context/AuthContext.jsx`
-   - `OrderItem` → `src/context/AuthContext.jsx`
-   - `Review` → `src/data.js` / `src/pages/VendorDetail.jsx`
-   - `Favourite` → `src/context/AuthContext.jsx`
+   - `User` (`UserModel`) → `server/models/User.ts` (client session hooks in `src/context/AuthContext.jsx`)
+   - `Market` → `supabase/schema.sql` / `src/data.js`
+   - `Vendor` → `supabase/schema.sql` / `src/data.js`
+   - `Product` (`ProductModel`) → `server/models/Product.ts`
+   - `CartItem` → `src/context/AuthContext.jsx` (local unsubmitted cart)
+   - `Order` (`OrderModel`) → `server/models/Order.ts`
+   - `OrderItem` → `supabase/schema.sql` / `server/models/Order.ts`
+   - `Review` (`ReviewModel`) → `server/models/Review.ts`
+   - `Favourite` (`FavouriteModel`) → `server/models/Favourite.ts`
 
 ---
 
-## 1. User
+## 1. User (`UserModel` / `Actor`)
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `email` | `string` | Primary lookup identifier, unique |
-| `password` | `string` | Plaintext in prototype demo store; stripped from active session state |
-| `firstName` | `string` | User given name |
-| `lastName` | `string` | User family name |
-| `role` | `string` | Enum: `"customer"`, `"vendor"` |
-| `vendorId` | `string \| undefined` | Foreign key to `Vendor.id`; present when `role === "vendor"` |
-| `vendorName` | `string \| undefined` | Display name of producer stall |
-| `marketId` | `string \| undefined` | Foreign key to `Market.id`; defaults to `"st-jacobs"` on registration |
-| `city` | `string \| undefined` | Geographic municipality |
-| `isApproved` | `boolean` | `true` for customers; `false` ("Pending admin approval") for new vendor accounts |
-| `createdAt` | `string` | ISO calendar date string (`YYYY-MM-DD`) |
+| `id` | `uuid` | Primary key; references `auth.users(id) on delete cascade` |
+| `email` | `text` | Account email synced from Supabase Auth |
+| `firstName` (`first_name`) | `text` | User given name |
+| `lastName` (`last_name`) | `text` | User family name |
+| `role` | `text` | Enum: `'customer' \| 'vendor'`; protected from client update via `prevent_profile_role_escalation()` trigger |
+| `city` | `text \| null` | Optional municipality |
+| `vendorId` | `string \| null` | Derived on server from `vendors.owner_user_id = id` |
+| `vendorName` | `string \| null` | Derived stall name |
+| `marketId` | `string \| null` | Derived attended market foreign key |
+| `marketName` | `string \| null` | Derived attended market name |
+| `isApproved` | `boolean` | `true` for customers; equals `vendors.is_approved` for vendors |
+| `createdAt` (`created_at`) | `timestamptz` | Profile creation timestamp |
 
-### User.login
+*Note: Passwords and password hashes are managed exclusively inside Supabase Auth (`auth.users`) and never enter `public.profiles` or API responses.*
 
-Authenticates credentials against demo accounts or registered users in local storage; callable by an unauthenticated visitor.
+### UserModel.resolveActorFromToken(accessToken)
+
+Validates a Supabase JWT bearer token and hydrates the server-side `Actor` (profile + linked vendor stall status); called by `requireActor` middleware on every authenticated API route.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor V as Visitor
-    participant User.login
-    participant DB as LocalStorage
+    actor C as Client
+    participant MW as requireActor
+    participant M as UserModel.resolveActorFromToken
+    participant DB as SupabaseAuthAndPostgres
 
-    V->>User.login: login(email, password)
-    User.login->>DB: read DEMO_ACCOUNTS and basket_registered_users
-    DB-->>User.login: accounts
-    Note over User.login: guard — matching normalized email and exact password found
-    alt valid credentials found
-        User.login->>DB: write basket_auth_user (session user)
-        DB-->>User.login: ok
-        User.login-->>V: { success: true, user }
-    else invalid credentials
-        User.login-->>V: { success: false, error: "Invalid email or password" }
+    C->>MW: HTTP request with Bearer token
+    MW->>M: resolveActorFromToken(accessToken)
+    M->>DB: auth.getUser(accessToken)
+    DB-->>M: authUser or error
+    alt invalid or expired token
+        M-->>MW: throw DomainError(401)
+    else valid authUser
+        M->>DB: select * from profiles where id = authUser.id
+        DB-->>M: profile row or null
+        alt profile missing
+            M->>DB: upsert profiles from user_metadata
+            DB-->>M: ok
+        end
+        alt role is vendor
+            M->>DB: select vendor where owner_user_id = authUser.id
+            DB-->>M: vendor row or null
+        end
+        M-->>MW: Actor object
     end
 ```
 
-### User.signup
+### UserModel.deleteAccount(actor)
 
-Creates a new customer or vendor account record in local storage and establishes a session; callable by an unauthenticated visitor.
+Permanently deletes the authenticated user from Supabase Auth (cascading to `profiles`, `favourites`, and detaching/deleting owned rows per schema foreign keys); callable by the authenticated account owner via `DELETE /api/account`.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor V as Visitor
-    participant User.signup
-    participant DB as LocalStorage
+    actor U as AuthenticatedUser
+    participant API as DELETE /api/account
+    participant M as UserModel.deleteAccount
+    participant DB as SupabaseAdmin
 
-    V->>User.signup: signup({ firstName, lastName, email, password, role })
-    User.signup->>DB: read basket_registered_users
-    DB-->>User.signup: existingUsers
-    Note over User.signup: guard — email does not already exist in registry
-    alt email already registered
-        User.signup-->>V: { success: false, error: "An account with this email already exists." }
-    else email is unique
-        User.signup->>DB: write updated basket_registered_users
-        DB-->>User.signup: ok
-        User.signup->>DB: write basket_auth_user (session user)
-        DB-->>User.signup: ok
-        User.signup-->>V: { success: true, user }
+    U->>API: DELETE /api/account (Bearer token)
+    API->>M: deleteAccount(actor)
+    M->>DB: auth.admin.deleteUser(actor.id)
+    DB-->>M: result or error
+    alt error deleting user
+        M-->>API: throw DomainError(500)
+        API-->>U: 500 JSON error
+    else deleted
+        M-->>API: { deleted: true }
+        API-->>U: 200 { deleted: true }
     end
-```
-
-### User.logout
-
-Clears the active session user from memory and local storage; callable by an authenticated user.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as User
-    participant User.logout
-    participant DB as LocalStorage
-
-    U->>User.logout: logout()
-    User.logout->>DB: removeItem basket_auth_user
-    DB-->>User.logout: ok
-    User.logout-->>U: void
-```
-
-### User.deleteAccount
-
-Removes the user session, resets the pre-order cart, and clears storage keys; callable by an authenticated user.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as User
-    participant User.deleteAccount
-    participant DB as LocalStorage
-
-    U->>User.deleteAccount: deleteAccount()
-    User.deleteAccount->>DB: removeItem basket_auth_user
-    DB-->>User.deleteAccount: ok
-    User.deleteAccount->>DB: removeItem basket_cart_items
-    DB-->>User.deleteAccount: ok
-    User.deleteAccount-->>U: void
 ```
 
 ---
@@ -132,22 +107,22 @@ sequenceDiagram
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Primary key (e.g. `"st-jacobs"`, `"byward"`) |
-| `name` | `string` | Formal market name |
-| `city` | `string` | Municipality with regional context |
-| `region` | `string` | Ontario geographic territory |
-| `address` | `string` | Street address with postal code |
-| `lat` | `number` | WGS84 latitude coordinate for map pin |
-| `lng` | `number` | WGS84 longitude coordinate for map pin |
-| `season` | `string` | Operating seasonal calendar |
-| `hoursTable` | `Array<{ day: string, hours: string }>` | Operating hours schedule table |
-| `summaryHours` | `string` | Abbreviated schedule for overview cards |
-| `description` | `string` | Market history and community background |
-| `announcement` | `object` | Embedded `{ title, date, content, image }` |
-| `vendorIds` | `Array<string>` | Foreign key list to `Vendor.id` |
-| `heroImage` | `string` | Banner visual asset URL |
+| `id` | `text` | Primary key (e.g. `'st-jacobs'`, `'byward'`) |
+| `name` | `text` | Formal market name |
+| `city` | `text` | Municipality |
+| `region` | `text` | Ontario region |
+| `address` | `text` | Street address |
+| `lat` | `double precision` | Latitude coordinate |
+| `lng` | `double precision` | Longitude coordinate |
+| `season` | `text` | Operating seasonal schedule |
+| `hours_table` | `jsonb` | Array of `{ day, hours }` objects |
+| `summary_hours` | `text` | Abbreviated hours for cards |
+| `description` | `text` | Market description |
+| `announcement` | `jsonb \| null` | Embedded `{ title, date, content, imageKey }` |
+| `hero_image_key` | `text` | Asset key (`'hero' \| 'produce' \| 'bakery' \| 'preserves'`) |
+| `created_at` | `timestamptz` | Creation timestamp |
 
-**Methods:** none — read-only catalog initialized from static configuration in `src/data.js`. No separate diagram.
+**Methods:** none — read-only public catalog table queried via Supabase anon client (`fetchMarkets`, `fetchMarketById` in `src/data.js`). No separate diagram.
 
 ---
 
@@ -155,279 +130,283 @@ sequenceDiagram
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Primary key (e.g. `"v-harvest-table"`) |
-| `name` | `string` | Farm or bakery business name |
-| `marketId` | `string` | Foreign key referencing `Market.id` |
-| `marketName` | `string` | Denormalized display name of attended market |
-| `city` | `string` | Producer home municipality |
-| `category` | `string` | Producer category: `"Produce"`, `"Bakery"`, `"Honey & Preserves"`, `"Dairy & Cheese"`, `"Meats & Dairy"` |
-| `shortDescription` | `string` | One-sentence summary for cards |
-| `fullDescription` | `string` | Detailed agricultural practices narrative |
-| `rating` | `number` | Average completed-order star rating (1.0–5.0) |
-| `reviewCount` | `number` | Total number of customer reviews |
-| `image` | `string` | Card thumbnail image asset URL |
-| `bannerImage` | `string` | Stall header image asset URL |
-| `stallLocation` | `string` | Physical stall location inside the market |
-| `pickupInstructions` | `string` | Customer pickup and payment directions |
+| `id` | `text` | Primary key (e.g. `'v-harvest-table'`) |
+| `owner_user_id` | `uuid \| null` | Foreign key to `profiles(id) on delete set null`, indexed |
+| `market_id` | `text` | Foreign key to `markets(id) on delete cascade`, indexed |
+| `name` | `text` | Farm stand or bakery name |
+| `city` | `text` | Home municipality |
+| `category` | `text` | Producer category |
+| `short_description` | `text` | Summary description |
+| `full_description` | `text` | Detailed farm story |
+| `stall_location` | `text` | Physical stall location |
+| `pickup_instructions` | `text` | Pickup and in-person payment instructions |
+| `image_key` | `text` | Thumbnail asset key |
+| `banner_image_key` | `text` | Banner asset key |
+| `is_approved` | `boolean` | Default `false`; controls public visibility & dashboard publishing |
+| `created_at` | `timestamptz` | Creation timestamp |
 
-**Methods:** none — read-only catalog initialized from static configuration in `src/data.js`. No separate diagram.
+**Methods:** none — created automatically in pending state by `handle_new_user()` trigger on vendor signup and read publicly when `is_approved = true` via RLS (`fetchVendors`, `fetchVendorDetail` in `src/data.js`). No separate diagram.
 
 ---
 
-## 4. Product
+## 4. Product (`ProductModel`)
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Primary key (e.g. `"p-sweet-corn"`, `"p-<timestamp>"`) |
-| `vendorId` | `string` | Foreign key referencing `Vendor.id` |
-| `name` | `string` | Crop or baked item title |
-| `price` | `number` | Unit price in CAD |
-| `unit` | `string` | Sold unit description (e.g. `"dozen"`, `"loaf"`, `"500ml glass bottle"`) |
-| `category` | `string` | Crop category matching vendor domain |
-| `description` | `string` | Harvesting notes, culinary profile, storage |
-| `isAvailable` | `boolean` | Availability toggle (`true` = available this week, `false` = sold out) |
-| `image` | `string` | Thumbnail asset URL |
+| `id` | `text` | Primary key (`'p-' || gen_random_uuid()`) |
+| `vendor_id` | `text` | Foreign key to `vendors(id) on delete cascade`, indexed |
+| `name` | `text` | Product title (max 120 chars) |
+| `price_cents` | `integer` | Authoritative unit price in CAD cents (`> 0`) |
+| `unit` | `text` | Packaging unit (max 50 chars) |
+| `category` | `text` | Whitelisted crop category |
+| `description` | `text` | Product description (max 1000 chars) |
+| `is_available` | `boolean` | Availability flag (`true` = available this week) |
+| `image_key` | `text` | Asset key (`'produce' \| 'bakery' \| 'preserves' \| 'hero'`) |
+| `created_at` | `timestamptz` | Creation timestamp |
 
-### Product.getStoredProducts
+### ProductModel.create(input, actor)
 
-Retrieves the current product list from local storage or falls back to initial defaults; callable by any visitor, customer, or vendor.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor V as Visitor
-    participant Product.getStoredProducts
-    participant DB as LocalStorage
-
-    V->>Product.getStoredProducts: getStoredProducts()
-    Product.getStoredProducts->>DB: getItem basket_products_data
-    DB-->>Product.getStoredProducts: rawJson
-    Note over Product.getStoredProducts: guard — entry exists in local storage
-    alt stored records exist
-        Product.getStoredProducts-->>V: JSON.parse(rawJson)
-    else no record in storage
-        Product.getStoredProducts->>DB: setItem basket_products_data (INITIAL_PRODUCTS)
-        DB-->>Product.getStoredProducts: ok
-        Product.getStoredProducts-->>V: INITIAL_PRODUCTS
-    end
-```
-
-### Product.saveStoredProducts
-
-Persists the full product array into local storage and dispatches a window update event; callable by a vendor from the dashboard.
+Validates fields and inserts a new product scoped to `actor.vendorId`; callable only by an approved vendor.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor V as Vendor
-    participant Product.saveStoredProducts
-    participant DB as LocalStorage
+    participant API as POST /api/products
+    participant M as ProductModel.create
+    participant DB as SupabasePostgres
 
-    V->>Product.saveStoredProducts: saveStoredProducts(products)
-    Product.saveStoredProducts->>DB: setItem basket_products_data (JSON)
-    DB-->>Product.saveStoredProducts: ok
-    Note over Product.saveStoredProducts: dispatches Event "basket_products_updated"
-    Product.saveStoredProducts-->>V: void
+    V->>API: POST /api/products (input, Bearer token)
+    API->>M: create(input, actor)
+    Note over M: guard — actor.role === 'vendor' && actor.vendorId && actor.isApproved
+    alt not an approved vendor
+        M-->>API: throw DomainError(403)
+        API-->>V: 403 JSON error
+    else approved vendor
+        Note over M: validate name, price (>0 -> price_cents), unit, category, description, image_key
+        M->>DB: insert into products (vendor_id = actor.vendorId, ...)
+        DB-->>M: created row
+        M-->>API: serialized Product
+        API-->>V: 201 { product }
+    end
+```
+
+### ProductModel.update(productId, input, actor)
+
+Updates allowed fields on a product after verifying vendor approval and stall ownership; callable only by the owning approved vendor.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor V as Vendor
+    participant API as PATCH /api/products/:id
+    participant M as ProductModel.update
+    participant DB as SupabasePostgres
+
+    V->>API: PATCH /api/products/:id (input, Bearer token)
+    API->>M: update(productId, input, actor)
+    Note over M: guard — actor.role === 'vendor' && actor.isApproved
+    M->>DB: select * from products where id = productId
+    DB-->>M: existing row or null
+    alt not found or existing.vendor_id !== actor.vendorId
+        M-->>API: throw DomainError(404 or 403)
+        API-->>V: 403/404 JSON error
+    else owner verified
+        M->>DB: update products set ... where id = productId and vendor_id = actor.vendorId
+        DB-->>M: updated row
+        M-->>API: serialized Product
+        API-->>V: 200 { product }
+    end
+```
+
+### ProductModel.toggleAvailability(productId, isAvailable, actor)
+
+Delegates toggling `is_available` on an owned product to `ProductModel.update`; callable only by the owning approved vendor.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor V as Vendor
+    participant T as ProductModel.toggleAvailability
+    participant U as ProductModel.update
+
+    V->>T: toggleAvailability(productId, isAvailable, actor)
+    T->>U: update(productId, { isAvailable }, actor)
+    U-->>T: serialized Product
+    T-->>V: serialized Product
+```
+
+### ProductModel.remove(productId, actor)
+
+Deletes a product after verifying vendor approval and ownership; callable only by the owning approved vendor.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor V as Vendor
+    participant API as DELETE /api/products/:id
+    participant M as ProductModel.remove
+    participant DB as SupabasePostgres
+
+    V->>API: DELETE /api/products/:id (Bearer token)
+    API->>M: remove(productId, actor)
+    Note over M: guard — actor.role === 'vendor' && actor.isApproved
+    M->>DB: select id, vendor_id from products where id = productId
+    DB-->>M: existing row or null
+    alt not found or existing.vendor_id !== actor.vendorId
+        M-->>API: throw DomainError(404 or 403)
+        API-->>V: 403/404 JSON error
+    else owner verified
+        M->>DB: delete from products where id = productId and vendor_id = actor.vendorId
+        DB-->>M: ok
+        M-->>API: { deleted: true, id: productId }
+        API-->>V: 200 { deleted: true, id }
+    end
 ```
 
 ---
 
-## 5. CartItem
+## 5. CartItem (Unsubmitted Client Basket)
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Primary key (`"cart-item-<timestamp>-<hash>"`) |
-| `productId` | `string` | Foreign key referencing `Product.id` |
-| `name` | `string` | Denormalized snapshot of product name |
-| `price` | `number` | Snapshot unit price in CAD |
-| `unit` | `string` | Packaging unit |
-| `image` | `string` | Display asset URL |
-| `quantity` | `number` | Integer reserve quantity |
-| `vendorId` | `string` | Foreign key referencing `Vendor.id` |
-| `vendorName` | `string` | Denormalized vendor title |
-| `marketId` | `string` | Foreign key referencing `Market.id` |
-| `marketName` | `string` | Denormalized market title |
-| `stallLocation` | `string` | Stall location instructions |
+| `id` | `string` | Ephemeral client identifier (`'cart-item-...'`) |
+| `productId` | `string` | Reference to `products.id` (re-verified on server at checkout) |
+| `name` | `string` | Display name in basket |
+| `price` | `number` | Display unit price (ignored by server at checkout) |
+| `unit` | `string` | Display unit |
+| `image` | `string` | Display image URL |
+| `quantity` | `number` | Integer quantity |
+| `vendorId` | `string` | Vendor reference for cart grouping |
+| `vendorName` | `string` | Display vendor name |
+| `marketId` | `string` | Market reference |
+| `marketName` | `string` | Display market name |
+| `stallLocation` | `string` | Stall note |
 
-### CartItem.addToCart
+### CartItem.addToCart / updateCartQuantity / removeFromCart / clearCart
 
-Appends a reserved product to the customer cart or increments existing quantity; callable by a customer.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor C as Customer
-    participant CartItem.addToCart
-    participant DB as LocalStorage
-
-    C->>CartItem.addToCart: addToCart(product, vendor, market, quantity)
-    Note over CartItem.addToCart: guard — item with productId already in cart
-    alt item exists in cart
-        Note over CartItem.addToCart: existingItem.quantity += quantity
-    else new item
-        Note over CartItem.addToCart: construct CartItem record
-    end
-    CartItem.addToCart->>DB: setItem basket_cart_items (JSON)
-    DB-->>CartItem.addToCart: ok
-    CartItem.addToCart-->>C: void
-```
-
-### CartItem.updateCartQuantity
-
-Modifies an item's reserve quantity in the cart or delegates removal if quantity is zero or less; callable by a customer.
+Client-only state helpers in `src/context/AuthContext.jsx` that persist unsubmitted cart selections in `localStorage` (`basket_cart_items`) until submitted via `OrderModel.createBatch`.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor C as Customer
-    participant CartItem.updateCartQuantity
-    participant CartItem.removeFromCart
-    participant DB as LocalStorage
+    participant Cart as AuthContext Cart Helpers
+    participant LS as LocalStorage
 
-    C->>CartItem.updateCartQuantity: updateCartQuantity(cartItemId, quantity)
-    Note over CartItem.updateCartQuantity: guard — quantity <= 0
-    alt quantity <= 0
-        CartItem.updateCartQuantity->>CartItem.removeFromCart: removeFromCart(cartItemId)
-        CartItem.removeFromCart-->>CartItem.updateCartQuantity: void
-        CartItem.updateCartQuantity-->>C: void
-    else quantity > 0
-        Note over CartItem.updateCartQuantity: item.quantity = quantity
-        CartItem.updateCartQuantity->>DB: setItem basket_cart_items (JSON)
-        DB-->>CartItem.updateCartQuantity: ok
-        CartItem.updateCartQuantity-->>C: void
-    end
-```
-
-### CartItem.removeFromCart
-
-Deletes a product entry from the active cart state; callable by a customer.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor C as Customer
-    participant CartItem.removeFromCart
-    participant DB as LocalStorage
-
-    C->>CartItem.removeFromCart: removeFromCart(cartItemId)
-    Note over CartItem.removeFromCart: filter items matching cartItemId
-    CartItem.removeFromCart->>DB: setItem basket_cart_items (JSON)
-    DB-->>CartItem.removeFromCart: ok
-    CartItem.removeFromCart-->>C: void
-```
-
-### CartItem.clearCart
-
-Purges all entries from the pre-order cart; callable by a customer or internal order finalization.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor C as Customer
-    participant CartItem.clearCart
-    participant DB as LocalStorage
-
-    C->>CartItem.clearCart: clearCart()
-    Note over CartItem.clearCart: reset cart state to []
-    CartItem.clearCart->>DB: setItem basket_cart_items ("[]")
-    DB-->>CartItem.clearCart: ok
-    CartItem.clearCart-->>C: void
+    C->>Cart: addToCart / updateCartQuantity / removeFromCart / clearCart
+    Note over Cart: mutate in-memory cart array
+    Cart->>LS: setItem('basket_cart_items', JSON)
+    LS-->>Cart: ok
+    Cart-->>C: updated React cart state
 ```
 
 ---
 
-## 6. Order
+## 6. Order (`OrderModel`)
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Primary key format `"ORD-<4-digit-id>"` |
-| `date` | `string` | Order submission date (`YYYY-MM-DD`) |
-| `customerEmail` | `string` | Foreign key to `User.email` |
-| `customerName` | `string` | Full name of pre-ordering customer |
-| `vendorId` | `string` | Foreign key to `Vendor.id` |
-| `vendorName` | `string` | Denormalized producer stall title |
-| `marketId` | `string` | Foreign key to `Market.id` |
-| `marketName` | `string` | Denormalized market title |
-| `pickupWindow` | `string` | Selected pickup timeframe |
-| `customerNote` | `string` | Optional customer note to grower |
-| `items` | `Array<OrderItem>` | Embedded list of reserved crops |
-| `total` | `number` | Computed CAD sum due in person at stall |
-| `status` | `string` | Enum: `"Awaiting Pickup (Pay in Person)"`, `"Completed (Paid in person)"` |
-| `paymentMethod` | `string` | Fixed note: `"Pay in person at pickup (Cash, Debit, or e-Transfer)"` |
+| `id` | `text` | Primary key (`'ORD-<6-HEX>'`) |
+| `customer_id` | `uuid \| null` | Foreign key to `profiles(id) on delete set null`, indexed |
+| `customer_email` | `text` | Derived from `actor.email` |
+| `customer_name` | `text` | Derived from `actor.firstName` + `actor.lastName` |
+| `vendor_id` | `text` | Foreign key to `vendors(id) on delete cascade`, indexed |
+| `market_id` | `text` | Derived from `vendors.market_id`, references `markets(id)` |
+| `pickup_window` | `text` | Selected market pickup slot |
+| `customer_note` | `text` | Optional note (max 500 chars) |
+| `total_cents` | `integer` | Authoritative sum of `price_cents_snapshot * quantity` |
+| `status` | `text` | Enum: `'awaiting_pickup' \| 'completed' \| 'cancelled' \| 'no_show'` |
+| `payment_method` | `text` | Fixed: `'Pay in person at pickup (Cash, Debit, or e-Transfer)'` |
+| `created_at` | `timestamptz` | Creation timestamp |
 
-### Order.getStoredOrders
+### OrderModel.listForActor(actor)
 
-Retrieves existing customer and vendor pre-orders from local storage or defaults to initial seed data; callable by an authenticated customer or vendor.
+Returns orders placed by `actor.id` and (for vendors) incoming orders assigned to `actor.vendorId`; callable by any authenticated user via `GET /api/orders`.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as User
-    participant Order.getStoredOrders
-    participant DB as LocalStorage
+    actor U as AuthenticatedUser
+    participant API as GET /api/orders
+    participant M as OrderModel.listForActor
+    participant DB as SupabasePostgres
 
-    U->>Order.getStoredOrders: getStoredOrders()
-    Order.getStoredOrders->>DB: getItem basket_orders_data
-    DB-->>Order.getStoredOrders: rawJson
-    Note over Order.getStoredOrders: guard — stored orders exist in local storage
-    alt orders exist
-        Order.getStoredOrders-->>U: JSON.parse(rawJson)
-    else no orders recorded
-        Order.getStoredOrders->>DB: setItem basket_orders_data (INITIAL_ORDERS)
-        DB-->>Order.getStoredOrders: ok
-        Order.getStoredOrders-->>U: INITIAL_ORDERS
+    U->>API: GET /api/orders (Bearer token)
+    API->>M: listForActor(actor)
+    alt actor.role === 'vendor' and actor.vendorId
+        M->>DB: select orders + items where customer_id = actor.id or vendor_id = actor.vendorId
+    else customer
+        M->>DB: select orders + items where customer_id = actor.id
     end
+    DB-->>M: order rows
+    M-->>API: serialized orders
+    API-->>U: 200 { orders }
 ```
 
-### Order.saveStoredOrders
+### OrderModel.createBatch(input, actor)
 
-Persists orders array to local storage and triggers an update event; callable by the pre-order submission routine.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Caller as Order.placePreOrder
-    participant Order.saveStoredOrders
-    participant DB as LocalStorage
-
-    Caller->>Order.saveStoredOrders: saveStoredOrders(orders)
-    Order.saveStoredOrders->>DB: setItem basket_orders_data (JSON)
-    DB-->>Order.saveStoredOrders: ok
-    Note over Order.saveStoredOrders: dispatches Event "basket_orders_updated"
-    Order.saveStoredOrders-->>Caller: void
-```
-
-### Order.placePreOrder
-
-Partitions cart items by vendor, generates new order entities with initial status `"Awaiting Pickup (Pay in Person)"`, saves them, and clears the cart; callable by a customer.
+Validates requested product IDs and quantities against live PostgreSQL prices and availability, splits items by `vendor_id`, creates one `orders` row + `order_items` snapshots per vendor with `status = 'awaiting_pickup'`, and returns created orders; callable by any authenticated user via `POST /api/orders`.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor C as Customer
-    participant Order.placePreOrder
-    participant Order.getStoredOrders
-    participant Order.saveStoredOrders
-    participant CartItem.clearCart
-    participant DB as LocalStorage
+    participant API as POST /api/orders
+    participant M as OrderModel.createBatch
+    participant DB as SupabasePostgres
 
-    C->>Order.placePreOrder: placePreOrder({ pickupWindow, customerNote })
-    Note over Order.placePreOrder: guard — cart.length > 0
-    alt cart is empty
-        Order.placePreOrder-->>C: null
-    else cart has items
-        Note over Order.placePreOrder: partition items by vendorId<br/>compute subtotal per vendor<br/>set status = "Awaiting Pickup (Pay in Person)"
-        Order.placePreOrder->>Order.getStoredOrders: getStoredOrders()
-        Order.getStoredOrders-->>Order.placePreOrder: currentOrders
-        Order.placePreOrder->>Order.saveStoredOrders: saveStoredOrders([newOrders, ...currentOrders])
-        Order.saveStoredOrders->>DB: setItem basket_orders_data
-        DB-->>Order.saveStoredOrders: ok
-        Order.saveStoredOrders-->>Order.placePreOrder: void
-        Order.placePreOrder->>CartItem.clearCart: clearCart()
-        CartItem.clearCart->>DB: setItem basket_cart_items ("[]")
-        DB-->>CartItem.clearCart: ok
-        CartItem.clearCart-->>Order.placePreOrder: void
-        Order.placePreOrder-->>C: newOrders
+    C->>API: POST /api/orders ({ items, pickupWindow, customerNote }, Bearer token)
+    API->>M: createBatch(input, actor)
+    Note over M: validate non-empty items and integer quantities 1..100
+    M->>DB: select products + vendors where id in productIds
+    DB-->>M: live product and vendor rows
+    alt product missing, sold out, or vendor unapproved
+        M-->>API: throw DomainError(400 or 409)
+        API-->>C: 400/409 JSON error
+    else all items valid
+        Note over M: group by vendor_id; compute total_cents from DB price_cents
+        loop for each vendor group
+            M->>DB: insert orders (customer_id = actor.id, status = 'awaiting_pickup', total_cents)
+            M->>DB: insert order_items snapshots
+        end
+        M->>DB: select hydrated created orders
+        DB-->>M: order rows
+        M-->>API: serialized orders
+        API-->>C: 201 { orders }
+    end
+```
+
+### OrderModel.transition(orderId, targetStatus, actor)
+
+Transitions an `awaiting_pickup` order to `completed`, `no_show` (owning vendor only), or `cancelled` (owning customer only); callable via `PATCH /api/orders/:id/status`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as UserOrVendor
+    participant API as PATCH /api/orders/:id/status
+    participant M as OrderModel.transition
+    participant DB as SupabasePostgres
+
+    U->>API: PATCH /api/orders/:id/status ({ status }, Bearer token)
+    API->>M: transition(orderId, targetStatus, actor)
+    M->>DB: select * from orders where id = orderId
+    DB-->>M: existing order or null
+    alt order not found or illegal state transition
+        M-->>API: throw DomainError(404 or 409)
+        API-->>U: 404/409 JSON error
+    else transition allowed from awaiting_pickup
+        Note over M: guard — completed/no_show requires vendor owner; cancelled requires customer owner
+        alt actor lacks ownership/role for targetStatus
+            M-->>API: throw DomainError(403)
+            API-->>U: 403 JSON error
+        else authorized
+            M->>DB: update orders set status = targetStatus where id = orderId and status = 'awaiting_pickup'
+            DB-->>M: updated order row
+            M-->>API: serialized Order
+            API-->>U: 200 { order }
+        end
     end
 ```
 
@@ -437,121 +416,150 @@ sequenceDiagram
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Foreign key referencing `Product.id` |
-| `name` | `string` | Snapshot crop name at order creation |
-| `quantity` | `number` | Quantity reserved |
-| `price` | `number` | Snapshot unit price in CAD |
-| `unit` | `string` | Snapshot crop packaging unit |
+| `id` | `uuid` | Primary key (`gen_random_uuid()`) |
+| `order_id` | `text` | Foreign key to `orders(id) on delete cascade`, indexed |
+| `product_id` | `text \| null` | Foreign key to `products(id) on delete set null` |
+| `name_snapshot` | `text` | Authoritative product name at order time |
+| `price_cents_snapshot` | `integer` | Authoritative unit price in cents at order time |
+| `unit_snapshot` | `text` | Authoritative unit at order time |
+| `quantity` | `integer` | Reserved quantity (`> 0`) |
 
-**Methods:** none — embedded document array inside `Order.items` created during `Order.placePreOrder`. No separate diagram.
+**Methods:** none — immutable line-item rows inserted exclusively inside `OrderModel.createBatch`. No separate diagram.
 
 ---
 
-## 8. Review
+## 8. Review (`ReviewModel`)
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Primary key (`"r-1"`, `"rev-<timestamp>"`) |
-| `vendorId` | `string` | Foreign key referencing `Vendor.id` |
-| `customerName` | `string` | Customer display name |
-| `orderId` | `string` | Foreign key referencing `Order.id` |
-| `verifiedOrder` | `boolean` | Set to `true` ("Completed order") |
-| `date` | `string` | Human-readable relative date label |
-| `rating` | `number` | Integer rating value (1 to 5) |
-| `comment` | `string` | Feedback text |
+| `id` | `text` | Primary key (`'rev-' || gen_random_uuid()`) |
+| `vendor_id` | `text` | Foreign key to `vendors(id) on delete cascade`, indexed |
+| `order_id` | `text \| null` | Unique foreign key to `orders(id) on delete set null` |
+| `customer_id` | `uuid \| null` | Foreign key to `profiles(id) on delete set null` |
+| `customer_name` | `text` | Server-derived display name (`FirstName L.`) |
+| `rating` | `integer` | Integer `1..5` |
+| `comment` | `text` | Review feedback (max 1000 chars) |
+| `created_at` | `timestamptz` | Creation timestamp |
 
-### Review.getStoredReviews
+### ReviewModel.create(input, actor)
 
-Retrieves stored reviews or defaults to initial seed reviews; callable by any visitor or customer.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor V as Visitor
-    participant Review.getStoredReviews
-    participant DB as LocalStorage
-
-    V->>Review.getStoredReviews: getStoredReviews()
-    Review.getStoredReviews->>DB: getItem basket_reviews_data
-    DB-->>Review.getStoredReviews: rawJson
-    Note over Review.getStoredReviews: guard — reviews exist in storage
-    alt reviews exist
-        Review.getStoredReviews-->>V: JSON.parse(rawJson)
-    else no reviews found
-        Review.getStoredReviews->>DB: setItem basket_reviews_data (INITIAL_REVIEWS)
-        DB-->>Review.getStoredReviews: ok
-        Review.getStoredReviews-->>V: INITIAL_REVIEWS
-    end
-```
-
-### Review.saveStoredReviews
-
-Persists updated reviews array to local storage and dispatches a change event; callable by a customer leaving feedback.
+Creates a verified vendor review after confirming `orderId` belongs to `actor.id`, belongs to `vendorId`, is in `'completed'` status, and has not already been reviewed; callable by an authenticated customer via `POST /api/reviews`.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor C as Customer
-    participant Review.saveStoredReviews
-    participant DB as LocalStorage
+    participant API as POST /api/reviews
+    participant M as ReviewModel.create
+    participant DB as SupabasePostgres
 
-    C->>Review.saveStoredReviews: saveStoredReviews(reviews)
-    Review.saveStoredReviews->>DB: setItem basket_reviews_data (JSON)
-    DB-->>Review.saveStoredReviews: ok
-    Note over Review.saveStoredReviews: dispatches Event "basket_reviews_updated"
-    Review.saveStoredReviews-->>C: void
+    C->>API: POST /api/reviews ({ vendorId, orderId, rating, comment }, Bearer token)
+    API->>M: create(input, actor)
+    Note over M: validate integer rating 1..5 and non-empty comment
+    M->>DB: select id, customer_id, vendor_id, status from orders where id = orderId
+    DB-->>M: order row or null
+    alt order invalid, not owned by actor, wrong vendor, or not completed
+        M-->>API: throw DomainError(400/403/404/409)
+        API-->>C: error response
+    else completed order verified
+        M->>DB: select id from reviews where order_id = orderId
+        DB-->>M: existing review or null
+        alt review already exists
+            M-->>API: throw DomainError(409)
+            API-->>C: 409 JSON error
+        else no prior review
+            M->>DB: insert into reviews (customer_id = actor.id, customer_name derived, ...)
+            DB-->>M: inserted review
+            M-->>API: serialized Review
+            API-->>C: 201 { review }
+        end
+    end
 ```
 
 ---
 
-## 9. Favourite
+## 9. Favourite (`FavouriteModel`)
 
 | Field | Type | Key / Notes |
 |---|---|---|
-| `id` | `string` | Primary key; foreign key to either `Market.id` or `Vendor.id` |
+| `user_id` | `uuid` | Composite PK part 1; foreign key to `profiles(id) on delete cascade` |
+| `target_type` | `text` | Composite PK part 2; enum `'market' \| 'vendor'` |
+| `target_id` | `text` | Composite PK part 3; ID of bookmarked market or vendor |
+| `created_at` | `timestamptz` | Creation timestamp |
 
-### Favourite.toggleFavourite
+### FavouriteModel.list(actor)
 
-Adds or removes a target market or vendor ID from the user's bookmarked list; callable by any user.
+Returns the list of saved `target_id` values belonging to `actor.id`; callable by an authenticated user via `GET /api/favourites`.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as User
-    participant Favourite.toggleFavourite
-    participant DB as LocalStorage
+    actor U as AuthenticatedUser
+    participant API as GET /api/favourites
+    participant M as FavouriteModel.list
+    participant DB as SupabasePostgres
 
-    U->>Favourite.toggleFavourite: toggleFavourite(id)
-    Note over Favourite.toggleFavourite: guard — id already in favourites list
-    alt id in favourites
-        Note over Favourite.toggleFavourite: filter out id
-    else id not in favourites
-        Note over Favourite.toggleFavourite: append id to list
-    end
-    Favourite.toggleFavourite->>DB: setItem basket_favourites (JSON)
-    DB-->>Favourite.toggleFavourite: ok
-    Favourite.toggleFavourite-->>U: void
+    U->>API: GET /api/favourites (Bearer token)
+    API->>M: list(actor)
+    M->>DB: select target_id from favourites where user_id = actor.id
+    DB-->>M: target_id rows
+    M-->>API: string[]
+    API-->>U: 200 { favourites }
 ```
 
-### Favourite.isFavourite
+### FavouriteModel.toggle(targetType, targetId, actor)
 
-Evaluates whether a given entity identifier is saved in the user's favourites list; callable by any user.
+Toggles a market or vendor bookmark for `actor.id` after confirming the target exists; callable by an authenticated user via `POST /api/favourites/toggle`.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as User
-    participant Favourite.isFavourite
+    actor U as AuthenticatedUser
+    participant API as POST /api/favourites/toggle
+    participant M as FavouriteModel.toggle
+    participant DB as SupabasePostgres
 
-    U->>Favourite.isFavourite: isFavourite(id)
-    Note over Favourite.isFavourite: check favourites.includes(id)
-    Favourite.isFavourite-->>U: boolean
+    U->>API: POST /api/favourites/toggle ({ targetType, targetId }, Bearer token)
+    API->>M: toggle(targetType, targetId, actor)
+    M->>DB: select target_id from favourites where user_id = actor.id and target_type and target_id
+    DB-->>M: existing row or null
+    alt already saved
+        M->>DB: delete from favourites where user_id = actor.id and target_type and target_id
+        DB-->>M: ok
+        M-->>API: { saved: false, targetId }
+        API-->>U: 200 { saved: false, targetId }
+    else not yet saved
+        M->>DB: select id from markets/vendors where id = targetId
+        DB-->>M: target row or null
+        alt target missing
+            M-->>API: throw DomainError(404)
+            API-->>U: 404 JSON error
+        else target exists
+            M->>DB: insert into favourites (user_id = actor.id, target_type, target_id)
+            DB-->>M: ok
+            M-->>API: { saved: true, targetId }
+            API-->>U: 200 { saved: true, targetId }
+        end
+    end
 ```
 
 ---
 
-## 10. Architectural Boundaries & Cross-References
+## 10. Closure Check
 
-- **Client-Side Persistence:** Application state is managed via `localStorage` keys (`basket_auth_user`, `basket_cart_items`, `basket_products_data`, `basket_orders_data`, `basket_reviews_data`, `basket_favourites`).
-- **Client Route Gating:** Role-based access is evaluated in page components (e.g., `VendorDashboard.jsx` redirects customers to home with a toast).
-- **Target Roadmap:** For planned database migration, server-side RBAC, authoritative price validation, and the order transition state machine, see [`ROADMAP.md`](./ROADMAP.md).
+| Check | Status | Implementation Finding |
+|---|---|---|
+| Every method in every entity section has a diagram, or is declared method-less with a reason | ✅ | All server model methods (`UserModel`, `ProductModel`, `OrderModel`, `ReviewModel`, `FavouriteModel`) and client cart helpers have sequence diagrams; `Market`, `Vendor`, and `OrderItem` are explicitly method-less. |
+| Every method called by another method appears as an arrow + method name | ✅ | `ProductModel.toggleAvailability` delegates cleanly to `ProductModel.update` without duplicating logic. |
+| Every write takes `actor` as last parameter and enforces ownership inside itself | ✅ | `ProductModel.*`, `OrderModel.*`, `ReviewModel.create`, `FavouriteModel.toggle`, and `UserModel.deleteAccount` all take `actor` last and guard role/ownership internally. |
+| Server-derived fields are computed inside methods, not accepted from client | ✅ | `price_cents_snapshot`, `total_cents`, `customer_id`, `customer_name`, `status`, and order/review IDs are derived server-side. |
+| Every `alt` corresponds to a real guard or error path | ✅ | All `alt` branches match concrete validation, 401/403/404/409 `DomainError` checks in `server/models/*.ts`. |
+| Every FK is stated once, in the entity that owns the column | ✅ | Foreign keys are documented on the child entities owning the columns (`Vendor`, `Product`, `Order`, `OrderItem`, `Review`, `Favourite`). |
+
+---
+
+## 11. Deviations & Open Questions
+
+- **Unsubmitted Cart Storage (`CartItem`):** Shopping cart items stay in browser `localStorage` (`basket_cart_items`) rather than a server table to allow frictionless browsing; all item IDs, availability, and prices are re-validated authoritatively on the server inside `OrderModel.createBatch`.
+- **Two-Step Order + OrderItem Insert:** `OrderModel.createBatch` inserts into `orders` and `order_items` across sequential Supabase REST calls rather than a single SQL `BEGIN ... COMMIT` RPC function. Wrapping checkout in a Postgres RPC transaction (plus optional `weekly_quota` stock decrement) is noted in `ROADMAP.md`.
+- **Favourite Cleanup on Vendor Delete:** `favourites.target_id` is polymorphic (`'market' \| 'vendor'`) without a relational foreign key; `FavouriteModel.toggle` validates existence at insert time.

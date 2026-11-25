@@ -22,37 +22,77 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
 export default function Account() {
-  const { user, isAuthenticated, isVendor, logout, deleteAccount, orders } = useAuth();
+  const {
+    user,
+    isAuthenticated,
+    isVendor,
+    authLoading,
+    logout,
+    deleteAccount,
+    orders,
+    transitionOrderStatus,
+  } = useAuth();
   const { addToast } = useToast();
   const navigate = useNavigate();
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [cancellingId, setCancellingId] = useState(null);
 
   // Protected route check
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!authLoading && !isAuthenticated) {
       addToast('Please log in to view your account and pre-orders.', 'info');
       navigate('/login');
     }
-  }, [isAuthenticated, navigate, addToast]);
+  }, [authLoading, isAuthenticated, navigate, addToast]);
+
+  if (authLoading) {
+    return (
+      <div className="max-w-5xl mx-auto px-4 py-20 text-center">
+        <div className="w-10 h-10 border-4 border-[#2F5D3A]/20 border-t-[#2F5D3A] rounded-full animate-spin mx-auto mb-3" />
+        <p className="text-xs text-stone-500">Loading your account...</p>
+      </div>
+    );
+  }
 
   if (!isAuthenticated || !user) return null;
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     addToast('You have been logged out.');
     navigate('/');
   };
 
-  const handleConfirmDelete = () => {
-    deleteAccount();
-    addToast('Your account and session have been deleted.', 'info');
-    navigate('/');
+  const handleConfirmDelete = async () => {
+    setIsDeleting(true);
+    try {
+      await deleteAccount();
+      addToast('Your account and data have been deleted.', 'info');
+      navigate('/');
+    } catch (err) {
+      addToast(err.message || 'Could not delete account.', 'error');
+      setIsDeleting(false);
+    }
   };
 
-  // Filter orders relevant to this user
+  const handleCancelOrder = async (orderId) => {
+    setCancellingId(orderId);
+    try {
+      await transitionOrderStatus(orderId, 'cancelled');
+      addToast(`Pre-order #${orderId} cancelled.`, 'info');
+    } catch (err) {
+      addToast(err.message || 'Failed to cancel pre-order.', 'error');
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  // Filter orders placed by this user (distinct from vendor-incoming orders shown on Dashboard)
   const userOrders = orders.filter(
-    (o) => !o.customerEmail || o.customerEmail.toLowerCase() === user.email.toLowerCase()
+    (o) =>
+      o.customerId === user.id ||
+      (!o.customerId && o.customerEmail && o.customerEmail.toLowerCase() === user.email.toLowerCase())
   );
 
   return (
@@ -64,7 +104,7 @@ export default function Account() {
             {user.firstName ? user.firstName[0] : 'U'}
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h1 className="font-display text-2xl font-bold text-[#232323]">
                 {user.firstName} {user.lastName}
               </h1>
@@ -122,84 +162,103 @@ export default function Account() {
 
         {userOrders.length > 0 ? (
           <div className="space-y-4">
-            {userOrders.map((order) => (
-              <div
-                key={order.id}
-                className="bg-white rounded-3xl p-6 border border-[#2F5D3A]/15 shadow-xs space-y-4"
-              >
-                {/* Order Top Bar */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-stone-100">
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono font-bold text-sm text-[#232323]">
-                      #{order.id}
-                    </span>
-                    <span className="text-xs text-stone-400">Placing Date: {order.date}</span>
-                  </div>
+            {userOrders.map((order) => {
+              const isCompleted = order.status === 'completed';
+              const isCancelledOrMissed = order.status === 'cancelled' || order.status === 'no_show';
+              const isAwaiting = order.status === 'awaiting_pickup';
 
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1.5 ${
-                      order.status.includes('Completed')
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : 'bg-[#FAF6EE] text-[#C96F4A] border border-[#C96F4A]/30'
-                    }`}>
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>{order.status}</span>
-                    </span>
-                  </div>
-                </div>
+              return (
+                <div
+                  key={order.id}
+                  className="bg-white rounded-3xl p-6 border border-[#2F5D3A]/15 shadow-xs space-y-4"
+                >
+                  {/* Order Top Bar */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-stone-100">
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono font-bold text-sm text-[#232323]">
+                        #{order.id}
+                      </span>
+                      <span className="text-xs text-stone-400">Placed: {order.date}</span>
+                    </div>
 
-                {/* Pickup details strip */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 bg-[#FAF6EE] rounded-2xl text-xs">
-                  <div>
-                    <span className="text-stone-500 font-semibold block">Market & Vendor</span>
-                    <span className="font-bold text-[#2F5D3A]">{order.vendorName}</span>
-                    <div className="flex items-center gap-1 text-stone-600 mt-0.5">
-                      <MapPin className="w-3 h-3 text-[#C96F4A]" />
-                      <span>{order.marketName}</span>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1.5 ${
+                        isCompleted
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : isCancelledOrMissed
+                          ? 'bg-stone-100 text-stone-600'
+                          : 'bg-[#FAF6EE] text-[#C96F4A] border border-[#C96F4A]/30'
+                      }`}>
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>{order.statusLabel || order.status}</span>
+                      </span>
+
+                      {isAwaiting && (
+                        <button
+                          type="button"
+                          disabled={cancellingId === order.id}
+                          onClick={() => handleCancelOrder(order.id)}
+                          className="text-xs font-semibold px-3 py-1 rounded-full border border-rose-200 text-rose-700 hover:bg-rose-50 transition-colors disabled:opacity-60"
+                        >
+                          {cancellingId === order.id ? 'Cancelling...' : 'Cancel Pre-Order'}
+                        </button>
+                      )}
                     </div>
                   </div>
 
-                  <div>
-                    <span className="text-stone-500 font-semibold block">Pickup Window</span>
-                    <div className="flex items-center gap-1 font-bold text-[#232323] mt-0.5">
-                      <Clock className="w-3 h-3 text-[#2F5D3A]" />
-                      <span>{order.pickupWindow}</span>
-                    </div>
-                    <span className="text-[11px] text-[#C96F4A] font-semibold mt-0.5 block">
-                      Pay in person (Cash, Debit, e-Transfer)
-                    </span>
-                  </div>
-                </div>
-
-                {/* Itemized product list */}
-                <div className="space-y-2 pt-1">
-                  <span className="text-xs font-bold text-stone-500 uppercase tracking-wider block">
-                    Reserved Items
-                  </span>
-                  <div className="divide-y divide-stone-100">
-                    {order.items.map((item, idx) => (
-                      <div key={idx} className="py-2 flex items-center justify-between text-xs">
-                        <span className="font-medium text-[#232323]">
-                          {item.quantity} × {item.name}
-                          {item.unit && <span className="text-stone-400"> ({item.unit})</span>}
-                        </span>
-                        <span className="font-mono font-semibold text-stone-700">
-                          ${(item.price * item.quantity).toFixed(2)}
-                        </span>
+                  {/* Pickup details strip */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 bg-[#FAF6EE] rounded-2xl text-xs">
+                    <div>
+                      <span className="text-stone-500 font-semibold block">Market & Vendor</span>
+                      <span className="font-bold text-[#2F5D3A]">{order.vendorName}</span>
+                      <div className="flex items-center gap-1 text-stone-600 mt-0.5">
+                        <MapPin className="w-3 h-3 text-[#C96F4A]" />
+                        <span>{order.marketName}</span>
                       </div>
-                    ))}
+                    </div>
+
+                    <div>
+                      <span className="text-stone-500 font-semibold block">Pickup Window</span>
+                      <div className="flex items-center gap-1 font-bold text-[#232323] mt-0.5">
+                        <Clock className="w-3 h-3 text-[#2F5D3A]" />
+                        <span>{order.pickupWindow}</span>
+                      </div>
+                      <span className="text-[11px] text-[#C96F4A] font-semibold mt-0.5 block">
+                        Pay in person (Cash, Debit, e-Transfer)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Itemized product list */}
+                  <div className="space-y-2 pt-1">
+                    <span className="text-xs font-bold text-stone-500 uppercase tracking-wider block">
+                      Reserved Items
+                    </span>
+                    <div className="divide-y divide-stone-100">
+                      {order.items.map((item, idx) => (
+                        <div key={idx} className="py-2 flex items-center justify-between text-xs">
+                          <span className="font-medium text-[#232323]">
+                            {item.quantity} × {item.name}
+                            {item.unit && <span className="text-stone-400"> ({item.unit})</span>}
+                          </span>
+                          <span className="font-mono font-semibold text-stone-700">
+                            ${(item.price * item.quantity).toFixed(2)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Total */}
+                  <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-sm">
+                    <span className="font-bold text-[#232323]">Total Due at Pickup:</span>
+                    <span className="font-display text-lg font-bold text-[#2F5D3A] font-mono tabular-nums">
+                      ${Number(order.total).toFixed(2)} CAD
+                    </span>
                   </div>
                 </div>
-
-                {/* Total */}
-                <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-sm">
-                  <span className="font-bold text-[#232323]">Total Due at Pickup:</span>
-                  <span className="font-display text-lg font-bold text-[#2F5D3A] font-mono tabular-nums">
-                    ${Number(order.total).toFixed(2)} CAD
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="bg-white rounded-3xl p-8 border border-dashed border-stone-300 text-center space-y-3">
@@ -228,7 +287,7 @@ export default function Account() {
           <h3 className="font-display text-lg font-bold">Account Management</h3>
         </div>
         <p className="text-xs text-stone-600 leading-relaxed">
-          Need to close your account? This will remove your account profile and active cart session.
+          Need to close your account? This will permanently remove your Supabase Auth user, saved favourites, and active cart session.
         </p>
 
         <button
@@ -253,13 +312,14 @@ export default function Account() {
                 Confirm Account Deletion
               </h3>
               <p className="text-xs text-stone-600 leading-relaxed">
-                Are you sure you want to delete your Basket account? This action will immediately end your session and clear your active cart items.
+                Are you sure you want to delete your Basket account? This action will immediately remove your profile from Supabase Auth and clear your active cart items.
               </p>
             </div>
 
             <div className="flex items-center gap-3 pt-3">
               <button
                 type="button"
+                disabled={isDeleting}
                 onClick={() => setShowDeleteConfirm(false)}
                 className="flex-1 py-2.5 px-4 rounded-xl border border-stone-300 text-xs font-semibold text-stone-700 hover:bg-stone-50"
               >
@@ -267,10 +327,11 @@ export default function Account() {
               </button>
               <button
                 type="button"
+                disabled={isDeleting}
                 onClick={handleConfirmDelete}
-                className="flex-1 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-xs"
+                className="flex-1 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-xs disabled:opacity-60"
               >
-                Yes, Delete My Account
+                {isDeleting ? 'Deleting...' : 'Yes, Delete My Account'}
               </button>
             </div>
           </div>

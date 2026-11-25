@@ -5,7 +5,7 @@
 
 import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { ShoppingBag, Lock, Mail, ArrowRight, ShieldCheck, UserCheck, Store } from 'lucide-react';
+import { ShoppingBag, Lock, Mail, ArrowRight, ShieldCheck, UserCheck, Store, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
@@ -13,7 +13,7 @@ export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const { login } = useAuth();
+  const { login, isSupabaseConfigured } = useAuth();
   const { addToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
@@ -22,6 +22,7 @@ export default function Login() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isLoading) return;
     if (!email || !password) {
       addToast('Please provide both email and password.', 'error');
       return;
@@ -32,14 +33,14 @@ export default function Login() {
     setIsLoading(false);
 
     if (result.success) {
-      addToast(`Welcome back, ${result.user.firstName}!`);
-      if (result.user.role === 'vendor') {
+      addToast(`Welcome back, ${result.user?.firstName || 'friend'}!`);
+      if (result.user?.role === 'vendor') {
         navigate('/dashboard');
       } else {
         navigate(from === '/login' ? '/' : from);
       }
     } else {
-      addToast(result.error || 'Login failed. Please check demo credentials.', 'error');
+      addToast(result.error || 'Login failed. Please check credentials.', 'error');
     }
   };
 
@@ -63,6 +64,21 @@ export default function Login() {
             Pre-order Ontario market harvest and manage stall inventory
           </p>
         </div>
+
+        {!isSupabaseConfigured && (
+          <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 text-xs text-amber-900 flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold">Supabase connection required</p>
+              <p className="text-[11px] leading-relaxed">
+                Add <code className="font-mono bg-amber-100 px-1 rounded">VITE_SUPABASE_URL</code>,{' '}
+                <code className="font-mono bg-amber-100 px-1 rounded">VITE_SUPABASE_ANON_KEY</code>, and{' '}
+                <code className="font-mono bg-amber-100 px-1 rounded">SUPABASE_SERVICE_ROLE_KEY</code> in{' '}
+                <code className="font-mono bg-amber-100 px-1 rounded">.env</code> to sign in.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Demo Credentials Callout Box */}
         <div className="bg-[#FAF6EE] rounded-2xl p-5 border-2 border-[#2F5D3A]/20 shadow-xs space-y-3">

@@ -86,39 +86,42 @@ export default function OntarioMap({ markets, selectedMarketId, onSelectMarket }
           if (onSelectMarket) onSelectMarket(market.id);
         });
 
-        // Popup content
+        // Popup content built via safe DOM nodes (no innerHTML interpolation)
         const popupContent = document.createElement('div');
         popupContent.className = 'p-3 max-w-[260px] text-[#232323]';
-        popupContent.innerHTML = `
-          <div style="font-family: 'Fraunces', serif; font-weight: 700; font-size: 15px; color: #2F5D3A; margin-bottom: 2px;">
-            ${market.name}
-          </div>
-          <div style="font-size: 11px; color: #C96F4A; font-weight: 600; text-transform: uppercase; margin-bottom: 6px;">
-            ${market.city}
-          </div>
-          <div style="font-size: 12px; color: #555; margin-bottom: 8px;">
-            ${market.summaryHours}
-          </div>
-          <div style="font-size: 11px; color: #2F5D3A; font-weight: 600; margin-bottom: 10px;">
-            ${market.vendorIds ? market.vendorIds.length : '3+'} Local Vendors Available
-          </div>
-          <a href="/markets/${market.id}" style="
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 100%;
-            background-color: #2F5D3A;
-            color: #FAF6EE;
-            padding: 6px 12px;
-            font-size: 12px;
-            font-weight: 600;
-            border-radius: 6px;
-            text-decoration: none;
-          ">
-            View Market & Pre-Order →
-          </a>
-        `;
 
+        const titleEl = document.createElement('div');
+        titleEl.style.cssText =
+          "font-family: 'Fraunces', serif; font-weight: 700; font-size: 15px; color: #2F5D3A; margin-bottom: 2px;";
+        titleEl.textContent = market.name || '';
+
+        const cityEl = document.createElement('div');
+        cityEl.style.cssText =
+          'font-size: 11px; color: #C96F4A; font-weight: 600; text-transform: uppercase; margin-bottom: 6px;';
+        cityEl.textContent = market.city || '';
+
+        const hoursEl = document.createElement('div');
+        hoursEl.style.cssText = 'font-size: 12px; color: #555; margin-bottom: 8px;';
+        hoursEl.textContent = market.summaryHours || '';
+
+        const vendorCountText =
+          typeof market.vendorCount === 'number'
+            ? market.vendorCount
+            : market.vendorIds
+            ? market.vendorIds.length
+            : '3+';
+        const vendorsEl = document.createElement('div');
+        vendorsEl.style.cssText =
+          'font-size: 11px; color: #2F5D3A; font-weight: 600; margin-bottom: 10px;';
+        vendorsEl.textContent = `${vendorCountText} Local Vendors Available`;
+
+        const linkEl = document.createElement('a');
+        linkEl.href = `/markets/${encodeURIComponent(market.id)}`;
+        linkEl.style.cssText =
+          'display: inline-flex; align-items: center; justify-content: center; width: 100%; background-color: #2F5D3A; color: #FAF6EE; padding: 6px 12px; font-size: 12px; font-weight: 600; border-radius: 6px; text-decoration: none;';
+        linkEl.textContent = 'View Market & Pre-Order →';
+
+        popupContent.append(titleEl, cityEl, hoursEl, vendorsEl, linkEl);
         marker.bindPopup(popupContent);
       });
 

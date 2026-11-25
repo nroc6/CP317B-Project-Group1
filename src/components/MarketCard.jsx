@@ -10,16 +10,31 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
 export default function MarketCard({ market }) {
-  const { isFavourite, toggleFavourite } = useAuth();
+  const { isAuthenticated, isFavourite, toggleFavourite } = useAuth();
   const { addToast } = useToast();
   const isFav = isFavourite(market.id);
 
-  const handleFavoriteClick = (e) => {
+  const handleFavoriteClick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    toggleFavourite(market.id);
-    addToast(isFav ? `Removed ${market.name} from favourites` : `Added ${market.name} to favourites!`);
+    if (!isAuthenticated) {
+      addToast('Log in to save favourite markets.', 'info');
+      return;
+    }
+    try {
+      const saved = await toggleFavourite(market.id, 'market');
+      addToast(saved ? `Added ${market.name} to favourites!` : `Removed ${market.name} from favourites`);
+    } catch (err) {
+      addToast(err.message || 'Could not update favourite.', 'error');
+    }
   };
+
+  const vendorTotal =
+    typeof market.vendorCount === 'number'
+      ? market.vendorCount
+      : market.vendorIds
+      ? market.vendorIds.length
+      : 0;
 
   return (
     <div className="group bg-white rounded-3xl border border-[#2F5D3A]/15 overflow-hidden shadow-xs hover:shadow-md transition-all duration-200 flex flex-col justify-between">
@@ -89,7 +104,7 @@ export default function MarketCard({ market }) {
       <div className="p-5 pt-0">
         <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs">
           <span className="font-semibold text-[#2F5D3A]">
-            {market.vendorIds ? market.vendorIds.length : 3} local vendors
+            {vendorTotal} local {vendorTotal === 1 ? 'vendor' : 'vendors'}
           </span>
           <Link
             to={`/markets/${market.id}`}

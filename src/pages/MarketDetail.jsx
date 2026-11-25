@@ -3,65 +3,127 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { 
-  MapPin, 
-  Clock, 
-  Calendar, 
-  Store, 
-  Heart, 
-  Share2, 
-  ArrowLeft, 
-  Star, 
-  Megaphone, 
+import {
+  MapPin,
+  Clock,
+  Calendar,
+  Store,
+  Heart,
+  Share2,
+  ArrowLeft,
+  Star,
+  Megaphone,
   ArrowRight,
-  ExternalLink,
-  CheckCircle2
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
-import { INITIAL_MARKETS, INITIAL_VENDORS } from '../data.js';
+import { fetchMarketById } from '../data.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
 export default function MarketDetail() {
   const { id } = useParams();
-  const { isFavourite, toggleFavourite } = useAuth();
+  const { isAuthenticated, isFavourite, toggleFavourite } = useAuth();
   const { addToast } = useToast();
 
-  const market = useMemo(() => {
-    return INITIAL_MARKETS.find((m) => m.id === id) || INITIAL_MARKETS[0];
+  const [market, setMarket] = useState(null);
+  const [vendors, setVendors] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setErrorMsg('');
+
+    fetchMarketById(id)
+      .then((res) => {
+        if (!active) return;
+        if (!res) {
+          setErrorMsg('Market not found.');
+          setMarket(null);
+          setVendors([]);
+        } else {
+          setMarket(res.market);
+          setVendors(res.vendors);
+        }
+      })
+      .catch((err) => {
+        if (!active) return;
+        setErrorMsg(err.message || 'Failed to load market details.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
   }, [id]);
 
-  // Vendors attending this market
-  const vendors = useMemo(() => {
-    return INITIAL_VENDORS.filter(
-      (v) => v.marketId === market.id || (market.vendorIds && market.vendorIds.includes(v.id))
-    );
-  }, [market]);
+  const isFav = market ? isFavourite(market.id) : false;
 
-  const isFav = isFavourite(market.id);
-
-  const handleFavoriteClick = () => {
-    toggleFavourite(market.id);
-    addToast(isFav ? `Removed ${market.name} from favourites` : `Added ${market.name} to favourites!`);
+  const handleFavoriteClick = async () => {
+    if (!market) return;
+    if (!isAuthenticated) {
+      addToast('Log in to save favourite markets.', 'info');
+      return;
+    }
+    try {
+      const saved = await toggleFavourite(market.id, 'market');
+      addToast(saved ? `Added ${market.name} to favourites!` : `Removed ${market.name} from favourites`);
+    } catch (err) {
+      addToast(err.message || 'Could not update favourites.', 'error');
+    }
   };
 
   const handleShare = () => {
+    if (!market) return;
     if (navigator.share) {
-      navigator.share({
-        title: market.name,
-        text: `Pre-order fresh farm goods from ${market.name} on Basket!`,
-        url: window.location.href,
-      }).catch(() => {});
+      navigator
+        .share({
+          title: market.name,
+          text: `Pre-order fresh farm goods from ${market.name} on Basket!`,
+          url: window.location.href,
+        })
+        .catch(() => {});
     } else {
       navigator.clipboard.writeText(window.location.href);
       addToast('Market link copied to clipboard!');
     }
   };
 
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        <div className="h-72 rounded-3xl bg-white border border-stone-200 animate-pulse" />
+        <div className="h-48 rounded-3xl bg-white border border-stone-200 animate-pulse" />
+      </div>
+    );
+  }
+
+  if (errorMsg || !market) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 py-12 text-center space-y-4">
+        <AlertCircle className="w-10 h-10 text-[#C96F4A] mx-auto" />
+        <h1 className="font-display text-2xl font-bold text-[#2F5D3A]">
+          {errorMsg || 'Market unavailable'}
+        </h1>
+        <Link
+          to="/"
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#2F5D3A] text-white text-xs font-bold"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to All Markets</span>
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
-      {/* Back button */}
       <div>
         <Link
           to="/"
@@ -83,7 +145,6 @@ export default function MarketDetail() {
           />
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
 
-          {/* Top action pills */}
           <div className="absolute top-4 right-4 flex items-center gap-2">
             <button
               onClick={handleFavoriteClick}
@@ -105,7 +166,6 @@ export default function MarketDetail() {
             </button>
           </div>
 
-          {/* Title & City overlay */}
           <div className="absolute bottom-6 left-6 right-6 text-white max-w-3xl">
             <span className="inline-block px-3 py-1 rounded-full bg-[#C96F4A] text-white text-[11px] font-bold uppercase tracking-wider mb-2">
               {market.city} · {market.region}
@@ -120,7 +180,6 @@ export default function MarketDetail() {
           </div>
         </div>
 
-        {/* Detailed Hours & Season Info Strip */}
         <div className="p-6 sm:p-8 grid grid-cols-1 md:grid-cols-3 gap-6 bg-[#FAF6EE]/50 border-t border-stone-100">
           <div className="space-y-1">
             <span className="text-[11px] font-bold text-[#C96F4A] uppercase tracking-wider block">
@@ -156,23 +215,18 @@ export default function MarketDetail() {
 
       {/* Main Grid: Description + Hours Table and Announcements Box */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Left 2 Cols: Description & Market Hours Table */}
         <div className="lg:col-span-2 space-y-8">
-          {/* About Section */}
           <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#2F5D3A]/15 shadow-xs space-y-4">
             <h2 className="font-display text-xl sm:text-2xl font-bold text-[#2F5D3A]">
               About {market.name}
             </h2>
-            <p className="text-sm text-stone-700 leading-relaxed">
-              {market.description}
-            </p>
+            <p className="text-sm text-stone-700 leading-relaxed">{market.description}</p>
             <div className="pt-2 flex items-center gap-2 text-xs text-stone-600">
               <CheckCircle2 className="w-4 h-4 text-[#2F5D3A]" />
               <span>All orders placed through Basket are collected directly in person at stall checkout.</span>
             </div>
           </div>
 
-          {/* Full Day-by-Day Hours Table */}
           <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#2F5D3A]/15 shadow-xs space-y-4">
             <h3 className="font-display text-xl font-bold text-[#2F5D3A] flex items-center gap-2">
               <Clock className="w-5 h-5 text-[#2F5D3A]" />
@@ -204,7 +258,6 @@ export default function MarketDetail() {
           </div>
         </div>
 
-        {/* Right 1 Col: Market Announcements Box (Text + One Image) */}
         <div className="space-y-6">
           <div className="bg-[#FAF6EE] rounded-3xl p-6 border-2 border-[#2F5D3A]/20 shadow-xs space-y-4">
             <div className="flex items-center gap-2 text-[#2F5D3A]">
@@ -212,7 +265,6 @@ export default function MarketDetail() {
               <h3 className="font-display font-bold text-lg">Market Announcements</h3>
             </div>
 
-            {/* Announcement Box: Text + One Image */}
             {market.announcement && (
               <div className="space-y-3 bg-white rounded-2xl p-4 border border-[#2F5D3A]/15 shadow-xs">
                 <div className="relative h-36 w-full rounded-xl overflow-hidden bg-stone-100">
@@ -245,7 +297,7 @@ export default function MarketDetail() {
         </div>
       </div>
 
-      {/* Vendors at that Market Section */}
+      {/* Vendors Section */}
       <section className="space-y-6 pt-4">
         <div>
           <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2F5D3A]">

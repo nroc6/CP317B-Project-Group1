@@ -30,26 +30,35 @@ export default function Cart() {
     cartItemCount, 
     updateCartQuantity, 
     removeFromCart, 
-    clearCart,
     placePreOrder,
     isAuthenticated,
-    user
+    authLoading,
   } = useAuth();
   
   const { addToast } = useToast();
   const navigate = useNavigate();
 
-  const [pickupWindow, setPickupWindow] = useState('Saturday 8:30 AM – 10:00 AM');
+  const [pickupWindow, setPickupWindow] = useState('Saturday 9:00 AM – 10:30 AM');
   const [customerNote, setCustomerNote] = useState('');
   const [placedOrders, setPlacedOrders] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  // Protected route check per prompt: logged-out users opening Cart/Account are sent to /login
+  // Protected route check: logged-out users opening Cart are sent to /login
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!authLoading && !isAuthenticated) {
       addToast('Please log in to view your pre-order cart.', 'info');
       navigate('/login', { state: { from: { pathname: '/cart' } } });
     }
-  }, [isAuthenticated, navigate, addToast]);
+  }, [authLoading, isAuthenticated, navigate, addToast]);
+
+  if (authLoading) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 py-20 text-center">
+        <div className="w-10 h-10 border-4 border-[#2F5D3A]/20 border-t-[#2F5D3A] rounded-full animate-spin mx-auto mb-3" />
+        <p className="text-xs text-stone-500">Loading your pre-order basket...</p>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) return null;
 
@@ -68,14 +77,21 @@ export default function Cart() {
     return acc;
   }, {});
 
-  const handlePlaceOrder = (e) => {
+  const handlePlaceOrder = async (e) => {
     e.preventDefault();
-    if (cart.length === 0) return;
+    if (cart.length === 0 || submitting) return;
 
-    const orders = placePreOrder({ pickupWindow, customerNote });
-    if (orders && orders.length > 0) {
-      setPlacedOrders(orders);
-      addToast(`Pre-order placed successfully! Order #${orders[0].id}`);
+    setSubmitting(true);
+    try {
+      const orders = await placePreOrder({ pickupWindow, customerNote });
+      if (orders && orders.length > 0) {
+        setPlacedOrders(orders);
+        addToast(`Pre-order placed successfully! Order #${orders[0].id}`);
+      }
+    } catch (err) {
+      addToast(err.message || 'Could not place pre-order. Please try again.', 'error');
+    } finally {
+      setSubmitting(false);
     }
   };
 
