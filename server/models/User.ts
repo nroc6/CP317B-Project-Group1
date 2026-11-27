@@ -4,9 +4,17 @@
  */
 
 import { requireSupabaseAdmin } from '../supabaseAdmin.ts';
-import { type Actor, DomainError } from './types.ts';
+import { type Actor, DomainError, toDateOnly } from './types.ts';
+
+type VendorFields = Pick<Actor, 'vendorId' | 'vendorName' | 'marketId' | 'marketName' | 'isApproved'>;
+
+// Supabase may return a joined row as an object or a one-element array.
+function firstJoined<T>(value: unknown): T | null {
+  return ((Array.isArray(value) ? value[0] : value) as T | undefined) ?? null;
+}
 
 export const UserModel = {
+  // Verifies a Supabase access token and builds the Actor (profile + vendor link) for it.
   async resolveActorFromToken(accessToken: string): Promise<Actor> {
     const db = requireSupabaseAdmin();
     const {
@@ -28,21 +36,13 @@ export const UserModel = {
       throw new DomainError(profErr.message, 500);
     }
 
-    // Self-heal profile if trigger wasn't executed yet
-    const role: 'customer' | 'vendor' =
-      profile?.role === 'vendor' || user.user_metadata?.role === 'vendor'
-        ? 'vendor'
-        : 'customer';
+    const meta = user.user_metadata || {};
+    const role: Actor['role'] =
+      profile?.role === 'vendor' || meta.role === 'vendor' ? 'vendor' : 'customer';
+    const firstName = (profile?.first_name as string) || (meta.first_name as string) || 'Market';
+    const lastName = (profile?.last_name as string) || (meta.last_name as string) || 'Member';
 
-    const firstName =
-      (profile?.first_name as string) ||
-      (user.user_metadata?.first_name as string) ||
-      'Market';
-    const lastName =
-      (profile?.last_name as string) ||
-      (user.user_metadata?.last_name as string) ||
-      'Member';
-
+    // Self-heal: create the profile if the signup trigger hasn't run yet.
     if (!profile) {
       await db.from('profiles').upsert({
         id: user.id,
@@ -53,11 +53,14 @@ export const UserModel = {
       });
     }
 
-    let vendorId: string | null = null;
-    let vendorName: string | null = null;
-    let marketId: string | null = null;
-    let marketName: string | null = null;
-    let isApproved = true;
+    // Vendors carry their stall/market link; a vendor without a stall is treated as unapproved.
+    let vendorFields: VendorFields = {
+      vendorId: null,
+      vendorName: null,
+      marketId: null,
+      marketName: null,
+      isApproved: role !== 'vendor',
+    };
 
     if (role === 'vendor') {
       const { data: vendor } = await db
@@ -67,16 +70,13 @@ export const UserModel = {
         .maybeSingle();
 
       if (vendor) {
-        const joinedMarket = Array.isArray(vendor.markets)
-          ? (vendor.markets[0] as { name?: string } | undefined)
-          : (vendor.markets as { name?: string } | null);
-        vendorId = vendor.id as string;
-        vendorName = vendor.name as string;
-        marketId = vendor.market_id as string;
-        marketName = joinedMarket?.name || null;
-        isApproved = Boolean(vendor.is_approved);
-      } else {
-        isApproved = false;
+        vendorFields = {
+          vendorId: vendor.id as string,
+          vendorName: vendor.name as string,
+          marketId: vendor.market_id as string,
+          marketName: firstJoined<{ name?: string }>(vendor.markets)?.name || null,
+          isApproved: Boolean(vendor.is_approved),
+        };
       }
     }
 
@@ -87,15 +87,12 @@ export const UserModel = {
       lastName,
       role,
       city: (profile?.city as string) || null,
-      vendorId,
-      vendorName,
-      marketId,
-      marketName,
-      isApproved,
-      createdAt: String(profile?.created_at || user.created_at || '').split('T')[0],
+      ...vendorFields,
+      createdAt: toDateOnly(profile?.created_at || user.created_at),
     };
   },
 
+  // Permanently deletes the actor's auth user (dependent rows cascade in the DB).
   async deleteAccount(actor: Actor) {
     const db = requireSupabaseAdmin();
     const { error } = await db.auth.admin.deleteUser(actor.id);

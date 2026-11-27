@@ -8,6 +8,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { ShoppingBag, Heart, User, Search, Store, Menu, X, ArrowRight } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
+// Sticky site header: logo, search, nav links with cart/favourite badges, and a mobile menu.
 export default function Header() {
   const { user, isAuthenticated, isVendor, cartItemCount, favourites } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
@@ -15,11 +16,14 @@ export default function Header() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const closeMenu = () => setIsMobileMenuOpen(false);
+
+  // Submits either search box by navigating to /search?q=...
   const handleSearch = (e) => {
     e.preventDefault();
     if (searchTerm.trim()) {
       navigate(`/search?q=${encodeURIComponent(searchTerm.trim())}`);
-      setIsMobileMenuOpen(false);
+      closeMenu();
     }
   };
 
@@ -33,8 +37,8 @@ export default function Header() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 sm:h-20 gap-4">
           {/* Brand Logo */}
-          <Link 
-            to="/" 
+          <Link
+            to="/"
             className="flex items-center gap-2.5 text-[#2F5D3A] font-bold text-2xl tracking-tight shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2F5D3A] rounded-lg"
             aria-label="Basket Home"
           >
@@ -52,7 +56,7 @@ export default function Header() {
           </Link>
 
           {/* Search Bar (Searches Markets and Products) */}
-          <form 
+          <form
             onSubmit={handleSearch}
             className="hidden md:flex flex-1 max-w-md mx-4 relative"
             role="search"
@@ -176,7 +180,7 @@ export default function Header() {
             {isVendor && (
               <Link
                 to="/dashboard"
-                onClick={() => setIsMobileMenuOpen(false)}
+                onClick={closeMenu}
                 className="flex items-center justify-between p-3 rounded-xl bg-[#2F5D3A]/10 text-[#2F5D3A] font-semibold text-sm"
               >
                 <div className="flex items-center gap-2">
@@ -189,7 +193,7 @@ export default function Header() {
 
             <Link
               to="/favourites"
-              onClick={() => setIsMobileMenuOpen(false)}
+              onClick={closeMenu}
               className="flex items-center justify-between p-3 rounded-xl hover:bg-[#FAF6EE] text-sm text-[#232323]"
             >
               <div className="flex items-center gap-2">
@@ -201,7 +205,7 @@ export default function Header() {
 
             <Link
               to="/cart"
-              onClick={() => setIsMobileMenuOpen(false)}
+              onClick={closeMenu}
               className="flex items-center justify-between p-3 rounded-xl hover:bg-[#FAF6EE] text-sm text-[#232323]"
             >
               <div className="flex items-center gap-2">
@@ -216,7 +220,7 @@ export default function Header() {
             {isAuthenticated ? (
               <Link
                 to="/account"
-                onClick={() => setIsMobileMenuOpen(false)}
+                onClick={closeMenu}
                 className="flex items-center justify-between p-3 rounded-xl hover:bg-[#FAF6EE] text-sm text-[#232323]"
               >
                 <div className="flex items-center gap-2">
@@ -228,7 +232,7 @@ export default function Header() {
             ) : (
               <Link
                 to="/login"
-                onClick={() => setIsMobileMenuOpen(false)}
+                onClick={closeMenu}
                 className="flex items-center justify-center gap-2 p-3 rounded-xl bg-[#2F5D3A] text-[#FAF6EE] font-semibold text-sm text-center"
               >
                 <User className="w-4 h-4" />

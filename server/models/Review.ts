@@ -4,7 +4,7 @@
  */
 
 import { requireSupabaseAdmin } from '../supabaseAdmin.ts';
-import { type Actor, DomainError } from './types.ts';
+import { type Actor, DomainError, cleanString, toDateOnly } from './types.ts';
 
 export interface CreateReviewInput {
   vendorId: string;
@@ -13,6 +13,7 @@ export interface CreateReviewInput {
   comment: string;
 }
 
+// Converts a reviews DB row into the camelCase shape the client uses.
 export function serializeReview(row: Record<string, unknown>) {
   return {
     id: row.id as string,
@@ -21,19 +22,21 @@ export function serializeReview(row: Record<string, unknown>) {
     customerId: (row.customer_id as string) || null,
     customerName: row.customer_name as string,
     verifiedOrder: true,
-    date: String(row.created_at || '').split('T')[0],
+    date: toDateOnly(row.created_at),
     rating: Number(row.rating),
     comment: row.comment as string,
   };
 }
 
 export const ReviewModel = {
+  // Creates a verified review: the actor must own a completed order with this vendor; one review per order.
   async create(input: CreateReviewInput, actor: Actor) {
-    const vendorId = typeof input.vendorId === 'string' ? input.vendorId.trim() : '';
-    const orderId = typeof input.orderId === 'string' ? input.orderId.trim() : '';
-    const comment = typeof input.comment === 'string' ? input.comment.trim() : '';
+    const vendorId = cleanString(input.vendorId);
+    const orderId = cleanString(input.orderId);
+    const comment = cleanString(input.comment);
     const rating = Number(input.rating);
 
+    // Validate the input before touching the DB.
     if (!vendorId || !orderId) {
       throw new DomainError('A completed order is required to submit a verified review.', 400);
     }
@@ -46,6 +49,7 @@ export const ReviewModel = {
 
     const db = requireSupabaseAdmin();
 
+    // The order must exist, belong to this actor and vendor, and be picked up.
     const { data: order, error: orderErr } = await db
       .from('orders')
       .select('id, customer_id, vendor_id, status')
@@ -68,6 +72,7 @@ export const ReviewModel = {
       throw new DomainError('Reviews can only be submitted after pickup is completed.', 409);
     }
 
+    // Only one review per order.
     const { data: existingReview } = await db
       .from('reviews')
       .select('id')
@@ -78,6 +83,7 @@ export const ReviewModel = {
       throw new DomainError('A review has already been submitted for this order.', 409);
     }
 
+    // Public display name is "First L." so reviews stay semi-anonymous.
     const lastInitial = actor.lastName ? ` ${actor.lastName[0]}.` : '';
     const displayName = `${actor.firstName}${lastInitial}`.trim() || 'Verified Customer';
 

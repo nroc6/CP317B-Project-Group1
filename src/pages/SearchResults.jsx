@@ -11,6 +11,7 @@ import { isSupabaseConfigured } from '../lib/supabase.js';
 import MarketCard from '../components/MarketCard.jsx';
 import ProductCard from '../components/ProductCard.jsx';
 
+// /search?q=... — lists markets and products matching the query.
 export default function SearchResults() {
   const [searchParams] = useSearchParams();
   const query = searchParams.get('q') || '';
@@ -24,6 +25,7 @@ export default function SearchResults() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Re-run the search whenever the query changes; `cancelled` ignores stale responses.
   useEffect(() => {
     let cancelled = false;
     if (!isSupabaseConfigured) {

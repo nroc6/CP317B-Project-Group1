@@ -22,17 +22,21 @@ import {
 import { fetchMarketById } from '../data.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
+import { useFavouriteToggle } from '../hooks/useFavouriteToggle.js';
 
+// /markets/:id — market info, hours, announcement and its approved vendors.
 export default function MarketDetail() {
   const { id } = useParams();
-  const { isAuthenticated, isFavourite, toggleFavourite } = useAuth();
+  const { isFavourite } = useAuth();
   const { addToast } = useToast();
+  const toggleFav = useFavouriteToggle();
 
   const [market, setMarket] = useState(null);
   const [vendors, setVendors] = useState([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
 
+  // Load the market whenever the URL id changes; `active` ignores stale responses.
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -65,20 +69,9 @@ export default function MarketDetail() {
 
   const isFav = market ? isFavourite(market.id) : false;
 
-  const handleFavoriteClick = async () => {
-    if (!market) return;
-    if (!isAuthenticated) {
-      addToast('Log in to save favourite markets.', 'info');
-      return;
-    }
-    try {
-      const saved = await toggleFavourite(market.id, 'market');
-      addToast(saved ? `Added ${market.name} to favourites!` : `Removed ${market.name} from favourites`);
-    } catch (err) {
-      addToast(err.message || 'Could not update favourites.', 'error');
-    }
-  };
+  const handleFavoriteClick = () => toggleFav(market, 'market');
 
+  // Uses the native share sheet when available, otherwise copies the link.
   const handleShare = () => {
     if (!market) return;
     if (navigator.share) {

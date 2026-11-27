@@ -21,14 +21,16 @@ interface AuthedRequest extends Request {
   actor?: Actor;
 }
 
-function asyncHandler(
-  fn: (req: AuthedRequest, res: Response, next: NextFunction) => Promise<void>
-) {
+type Handler = (req: AuthedRequest, res: Response, next: NextFunction) => Promise<void>;
+
+// Wraps an async route so rejected promises reach the Express error handler.
+function asyncHandler(fn: Handler) {
   return (req: AuthedRequest, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
 }
 
+// Middleware: reads the Bearer token and attaches the resolved Actor to req.actor (401 otherwise).
 async function requireActor(req: AuthedRequest, _res: Response, next: NextFunction) {
   try {
     const authHeader = req.headers.authorization || '';
@@ -46,81 +48,74 @@ async function requireActor(req: AuthedRequest, _res: Response, next: NextFuncti
   }
 }
 
-// Ensures the two documented demo accounts exist in Supabase Auth when demo login is clicked
+// ---------------------------------------------------------------------------
+// Demo accounts
+// ---------------------------------------------------------------------------
+
+const DEMO_CUSTOMER = {
+  email: 'customer@basket.ca',
+  first_name: 'Claire',
+  last_name: 'Dubois',
+  role: 'customer',
+  city: 'Kitchener',
+} as const;
+
+const DEMO_VENDOR = {
+  email: 'vendor@basket.ca',
+  first_name: 'Eli & Sarah',
+  last_name: 'Martin',
+  role: 'vendor',
+  city: 'Woolwich',
+} as const;
+
+type DemoProfile = typeof DEMO_CUSTOMER | typeof DEMO_VENDOR;
+
+// Returns the existing auth user for a demo profile, creating it if needed.
+async function findOrCreateDemoUser(
+  existingUsers: Array<{ id: string; email?: string }>,
+  profile: DemoProfile,
+  password: string
+) {
+  const found = existingUsers.find((u) => u.email?.toLowerCase() === profile.email);
+  if (found) return found;
+
+  const db = requireSupabaseAdmin();
+  const { data, error } = await db.auth.admin.createUser({
+    email: profile.email,
+    password,
+    email_confirm: true,
+    user_metadata: {
+      first_name: profile.first_name,
+      last_name: profile.last_name,
+      role: profile.role,
+      // Stops the signup trigger from creating a new stall; the demo vendor is linked to seed data below.
+      ...(profile.role === 'vendor' ? { skip_auto_vendor: 'true' } : {}),
+    },
+  });
+  if (error || !data.user) {
+    throw new DomainError(error?.message || `Failed to seed demo ${profile.role}.`, 500);
+  }
+  return data.user;
+}
+
+// Ensures both demo accounts exist and are linked to the seeded vendor, orders, reviews and favourites.
 async function ensureDemoAccounts() {
   const db = requireSupabaseAdmin();
   const demoPassword = process.env.DEMO_ACCOUNT_PASSWORD || 'demo1234';
 
-  const { data: listData, error: listErr } = await db.auth.admin.listUsers({
-    page: 1,
-    perPage: 200,
-  });
+  const { data: listData, error: listErr } = await db.auth.admin.listUsers({ page: 1, perPage: 200 });
   if (listErr) {
     throw new DomainError(listErr.message, 500);
   }
-
   const users = listData?.users || [];
-  let customerUser = users.find((u) => u.email?.toLowerCase() === 'customer@basket.ca');
-  let vendorUser = users.find((u) => u.email?.toLowerCase() === 'vendor@basket.ca');
 
-  if (!customerUser) {
-    const { data, error } = await db.auth.admin.createUser({
-      email: 'customer@basket.ca',
-      password: demoPassword,
-      email_confirm: true,
-      user_metadata: {
-        first_name: 'Claire',
-        last_name: 'Dubois',
-        role: 'customer',
-      },
-    });
-    if (error || !data.user) {
-      throw new DomainError(error?.message || 'Failed to seed demo customer.', 500);
-    }
-    customerUser = data.user;
-  }
+  const customerUser = await findOrCreateDemoUser(users, DEMO_CUSTOMER, demoPassword);
+  const vendorUser = await findOrCreateDemoUser(users, DEMO_VENDOR, demoPassword);
 
-  if (!vendorUser) {
-    const { data, error } = await db.auth.admin.createUser({
-      email: 'vendor@basket.ca',
-      password: demoPassword,
-      email_confirm: true,
-      user_metadata: {
-        first_name: 'Eli & Sarah',
-        last_name: 'Martin',
-        role: 'vendor',
-        skip_auto_vendor: 'true',
-      },
-    });
-    if (error || !data.user) {
-      throw new DomainError(error?.message || 'Failed to seed demo vendor.', 500);
-    }
-    vendorUser = data.user;
-  }
+  await db.from('profiles').upsert({ id: customerUser.id, ...DEMO_CUSTOMER });
+  await db.from('profiles').upsert({ id: vendorUser.id, ...DEMO_VENDOR });
 
-  // Link demo vendor user to Harvest Table Organics and demo customer to seeded sample orders
-  await db
-    .from('profiles')
-    .upsert({
-      id: customerUser.id,
-      email: 'customer@basket.ca',
-      first_name: 'Claire',
-      last_name: 'Dubois',
-      role: 'customer',
-      city: 'Kitchener',
-    });
-
-  await db
-    .from('profiles')
-    .upsert({
-      id: vendorUser.id,
-      email: 'vendor@basket.ca',
-      first_name: 'Eli & Sarah',
-      last_name: 'Martin',
-      role: 'vendor',
-      city: 'Woolwich',
-    });
-
+  // Link the demo vendor to Harvest Table Organics and claim the seeded orders/reviews for the demo customer.
   await db
     .from('vendors')
     .update({ owner_user_id: vendorUser.id, is_approved: true })
@@ -129,7 +124,7 @@ async function ensureDemoAccounts() {
   await db
     .from('orders')
     .update({ customer_id: customerUser.id })
-    .eq('customer_email', 'customer@basket.ca')
+    .eq('customer_email', DEMO_CUSTOMER.email)
     .is('customer_id', null);
 
   await db
@@ -138,7 +133,7 @@ async function ensureDemoAccounts() {
     .in('id', ['r-1', 'r-3'])
     .is('customer_id', null);
 
-  // Seed default favourites for demo customer if empty
+  // Give the demo customer default favourites if they have none.
   const { data: existingFavs } = await db
     .from('favourites')
     .select('target_id')
@@ -152,19 +147,20 @@ async function ensureDemoAccounts() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '100kb' }));
 
-  // Health & config status endpoint
+  // Health check: reports whether server-side Supabase credentials are present.
   app.get('/api/health', (_req, res) => {
-    res.json({
-      ok: true,
-      supabaseConfigured: isServerSupabaseConfigured,
-    });
+    res.json({ ok: true, supabaseConfigured: isServerSupabaseConfigured });
   });
 
-  // Demo account bootstrap (only active when explicitly requested from /login demo buttons)
+  // Demo account bootstrap, called by the demo buttons on /login.
   app.post(
     '/api/demo/ensure-accounts',
     asyncHandler(async (_req, res) => {
@@ -176,7 +172,7 @@ async function startServer() {
     })
   );
 
-  // Current authenticated actor profile
+  // --- Account ---
   app.get(
     '/api/me',
     requireActor,
@@ -185,17 +181,15 @@ async function startServer() {
     })
   );
 
-  // Account deletion (uses Supabase Admin API safely on server)
   app.delete(
     '/api/account',
     requireActor,
     asyncHandler(async (req, res) => {
-      const result = await UserModel.deleteAccount(req.actor!);
-      res.json(result);
+      res.json(await UserModel.deleteAccount(req.actor!));
     })
   );
 
-  // Product mutations (approved vendor owners only)
+  // --- Products (approved vendor owners only) ---
   app.post(
     '/api/products',
     requireActor,
@@ -218,18 +212,16 @@ async function startServer() {
     '/api/products/:id',
     requireActor,
     asyncHandler(async (req, res) => {
-      const result = await ProductModel.remove(req.params.id, req.actor!);
-      res.json(result);
+      res.json(await ProductModel.remove(req.params.id, req.actor!));
     })
   );
 
-  // Orders: read & authoritative checkout / lifecycle transitions
+  // --- Orders: listing, checkout, and status transitions ---
   app.get(
     '/api/orders',
     requireActor,
     asyncHandler(async (req, res) => {
-      const orders = await OrderModel.listForActor(req.actor!);
-      res.json({ orders });
+      res.json({ orders: await OrderModel.listForActor(req.actor!) });
     })
   );
 
@@ -252,7 +244,7 @@ async function startServer() {
     })
   );
 
-  // Verified completed-order reviews
+  // --- Reviews (verified completed orders only) ---
   app.post(
     '/api/reviews',
     requireActor,
@@ -262,13 +254,12 @@ async function startServer() {
     })
   );
 
-  // User favourites
+  // --- Favourites ---
   app.get(
     '/api/favourites',
     requireActor,
     asyncHandler(async (req, res) => {
-      const favourites = await FavouriteModel.list(req.actor!);
-      res.json({ favourites });
+      res.json({ favourites: await FavouriteModel.list(req.actor!) });
     })
   );
 
@@ -276,27 +267,20 @@ async function startServer() {
     '/api/favourites/toggle',
     requireActor,
     asyncHandler(async (req, res) => {
-      const result = await FavouriteModel.toggle(
-        req.body?.targetType,
-        req.body?.targetId,
-        req.actor!
-      );
-      res.json(result);
+      const { targetType, targetId } = req.body || {};
+      res.json(await FavouriteModel.toggle(targetType, targetId, req.actor!));
     })
   );
 
-  // API error handler
+  // API error handler: turns thrown errors into { error } JSON with their statusCode (default 500).
   app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const statusCode =
-      (err as { statusCode?: number })?.statusCode &&
-      Number((err as { statusCode?: number }).statusCode) >= 400
-        ? Number((err as { statusCode?: number }).statusCode)
-        : 500;
+    const code = Number((err as { statusCode?: number })?.statusCode);
+    const statusCode = code >= 400 ? code : 500;
     const message = err instanceof Error ? err.message : 'Internal server error';
     res.status(statusCode).json({ error: message });
   });
 
-  // Mount Vite middleware in development, or serve built dist/ in production
+  // Serve the built SPA in production, or mount Vite middleware in development.
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve(import.meta.dirname, 'dist');
     app.use(express.static(distDir));

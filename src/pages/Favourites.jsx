@@ -12,6 +12,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 import MarketCard from '../components/MarketCard.jsx';
 
+// /favourites — the signed-in user's saved markets and vendors.
 export default function Favourites() {
   const { favourites, toggleFavourite, isAuthenticated } = useAuth();
   const { addToast } = useToast();
@@ -20,6 +21,7 @@ export default function Favourites() {
   const [vendors, setVendors] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // Load the full catalog once, then filter it by the user's favourite IDs.
   useEffect(() => {
     let cancelled = false;
     if (!isSupabaseConfigured) {
@@ -50,6 +52,7 @@ export default function Favourites() {
   const favMarkets = markets.filter((m) => favourites.includes(m.id));
   const favVendors = vendors.filter((v) => favourites.includes(v.id));
 
+  // Un-saves a vendor from the list.
   const handleToggleVendor = async (vendorId) => {
     try {
       await toggleFavourite(vendorId, 'vendor');

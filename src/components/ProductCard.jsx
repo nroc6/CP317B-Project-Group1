@@ -4,10 +4,11 @@
  */
 
 import React, { useState } from 'react';
-import { ShoppingBag, Plus, Minus, Check, AlertCircle } from 'lucide-react';
+import { ShoppingBag, Plus, Minus, Check } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+// Card for one product with a quantity stepper and "Reserve" (add to cart) button.
 export default function ProductCard({ product, vendor, market }) {
   const [quantity, setQuantity] = useState(1);
   const [justAdded, setJustAdded] = useState(false);
@@ -16,6 +17,7 @@ export default function ProductCard({ product, vendor, market }) {
 
   const isAvailable = product.isAvailable !== false;
 
+  // Adds the chosen quantity to the cart and briefly shows an "Added!" state.
   const handleAddToCart = () => {
     if (!isAvailable) return;
 

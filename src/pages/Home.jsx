@@ -22,6 +22,22 @@ import MarketCard from '../components/MarketCard.jsx';
 import OntarioMap from '../components/OntarioMap.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+// Region filter chips; `id` is matched against each market's region.
+const REGION_FILTERS = [
+  { id: 'all', label: 'All Ontario' },
+  { id: 'Waterloo Region', label: 'Waterloo Region' },
+  { id: 'Eastern Ontario', label: 'Ottawa & East' },
+  { id: 'Greater Toronto Area', label: 'Toronto & GTA' },
+  { id: 'Golden Horseshoe', label: 'Hamilton & Niagara' },
+  { id: 'Wellington County', label: 'Guelph & Wellington' },
+  { id: 'Middlesex County', label: 'London & Middlesex' },
+  { id: 'Kawarthas', label: 'Peterborough & Kawarthas' },
+];
+
+// Strips a parenthetical suffix, e.g. "Toronto (Downtown)" -> "Toronto".
+const baseCity = (city) => city.split(' (')[0];
+
+// Landing page: hero, market search/filters, and list or map view of all markets.
 export default function Home() {
   const [markets, setMarkets] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -33,6 +49,7 @@ export default function Home() {
   const [isLocating, setIsLocating] = useState(false);
   const { addToast } = useToast();
 
+  // Load all markets once on mount (skipped when Supabase isn't configured).
   useEffect(() => {
     let active = true;
 
@@ -61,43 +78,30 @@ export default function Home() {
     };
   }, []);
 
+  // City dropdown options, derived from the loaded markets.
   const uniqueCities = useMemo(() => {
-    return Array.from(new Set(markets.map((m) => m.city.split(' (')[0]))).sort();
+    return Array.from(new Set(markets.map((m) => baseCity(m.city)))).sort();
   }, [markets]);
 
-  const uniqueRegions = useMemo(() => {
-    return [
-      { id: 'all', label: 'All Ontario' },
-      { id: 'Waterloo Region', label: 'Waterloo Region' },
-      { id: 'Eastern Ontario', label: 'Ottawa & East' },
-      { id: 'Greater Toronto Area', label: 'Toronto & GTA' },
-      { id: 'Golden Horseshoe', label: 'Hamilton & Niagara' },
-      { id: 'Wellington County', label: 'Guelph & Wellington' },
-      { id: 'Middlesex County', label: 'London & Middlesex' },
-      { id: 'Kawarthas', label: 'Peterborough & Kawarthas' },
-    ];
-  }, []);
-
+  // Applies the text search, city and region filters together.
   const filteredMarkets = useMemo(() => {
+    const query = searchQuery.toLowerCase();
+    const city = selectedCity.toLowerCase();
+    const region = selectedRegion.toLowerCase();
+
     return markets.filter((market) => {
       const matchSearch =
-        !searchQuery ||
-        market.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        market.city.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        market.description.toLowerCase().includes(searchQuery.toLowerCase());
-
-      const matchCity =
-        !selectedCity ||
-        market.city.toLowerCase().includes(selectedCity.toLowerCase());
-
-      const matchRegion =
-        selectedRegion === 'all' ||
-        market.region.toLowerCase().includes(selectedRegion.toLowerCase());
-
+        !query ||
+        market.name.toLowerCase().includes(query) ||
+        market.city.toLowerCase().includes(query) ||
+        market.description.toLowerCase().includes(query);
+      const matchCity = !city || market.city.toLowerCase().includes(city);
+      const matchRegion = selectedRegion === 'all' || market.region.toLowerCase().includes(region);
       return matchSearch && matchCity && matchRegion;
     });
   }, [markets, searchQuery, selectedCity, selectedRegion]);
 
+  // Uses browser geolocation to pick the nearest market's city as the filter.
   const handleUseLocation = () => {
     if (!navigator.geolocation) {
       addToast('Geolocation is not supported by your browser.', 'error');
@@ -110,6 +114,7 @@ export default function Home() {
         setIsLocating(false);
         const { latitude, longitude } = position.coords;
 
+        // Straight-line distance in degrees is good enough to pick the nearest market.
         let closest = null;
         let minDistance = Infinity;
 
@@ -122,7 +127,7 @@ export default function Home() {
         });
 
         if (closest) {
-          setSelectedCity(closest.city.split(' (')[0]);
+          setSelectedCity(baseCity(closest.city));
           addToast(`Found closest market: ${closest.name} in ${closest.city}!`);
         }
       },
@@ -321,7 +326,7 @@ export default function Home() {
             <Filter className="w-3 h-3 text-[#C96F4A]" />
             Region:
           </span>
-          {uniqueRegions.map((region) => (
+          {REGION_FILTERS.map((region) => (
             <button
               key={region.id}
               onClick={() => setSelectedRegion(region.id)}

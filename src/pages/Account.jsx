@@ -5,22 +5,21 @@
 
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { 
-  User, 
-  ShoppingBag, 
-  Clock, 
-  MapPin, 
-  Trash2, 
-  AlertTriangle, 
-  CheckCircle2, 
-  LogOut, 
-  ShieldCheck, 
+import {
+  ShoppingBag,
+  Clock,
+  MapPin,
+  Trash2,
+  AlertTriangle,
+  CheckCircle2,
+  LogOut,
   Store,
-  ChevronRight
+  ChevronRight,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+// /account — profile, the user's own pre-orders (with cancel), logout and account deletion.
 export default function Account() {
   const {
     user,
@@ -39,7 +38,7 @@ export default function Account() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [cancellingId, setCancellingId] = useState(null);
 
-  // Protected route check
+  // Redirect guests to /login.
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
       addToast('Please log in to view your account and pre-orders.', 'info');
@@ -58,12 +57,14 @@ export default function Account() {
 
   if (!isAuthenticated || !user) return null;
 
+  // Signs out and returns to the home page.
   const handleLogout = async () => {
     await logout();
     addToast('You have been logged out.');
     navigate('/');
   };
 
+  // Permanently deletes the account after the user confirms.
   const handleConfirmDelete = async () => {
     setIsDeleting(true);
     try {
@@ -76,6 +77,7 @@ export default function Account() {
     }
   };
 
+  // Cancels one of the user's awaiting-pickup orders.
   const handleCancelOrder = async (orderId) => {
     setCancellingId(orderId);
     try {
@@ -88,7 +90,7 @@ export default function Account() {
     }
   };
 
-  // Filter orders placed by this user (distinct from vendor-incoming orders shown on Dashboard)
+  // Only orders this user placed (vendors also receive their stall's incoming orders, shown on the Dashboard).
   const userOrders = orders.filter(
     (o) =>
       o.customerId === user.id ||
@@ -109,8 +111,8 @@ export default function Account() {
                 {user.firstName} {user.lastName}
               </h1>
               <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full ${
-                isVendor 
-                  ? 'bg-[#C96F4A] text-white' 
+                isVendor
+                  ? 'bg-[#C96F4A] text-white'
                   : 'bg-[#2F5D3A]/10 text-[#2F5D3A]'
               }`}>
                 {isVendor ? 'Ontario Vendor' : 'Customer Account'}

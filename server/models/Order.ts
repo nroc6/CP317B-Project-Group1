@@ -4,7 +4,7 @@
  */
 
 import { requireSupabaseAdmin } from '../supabaseAdmin.ts';
-import { type Actor, DomainError } from './types.ts';
+import { type Actor, DomainError, cleanString, toDateOnly } from './types.ts';
 
 export type OrderStatus = 'awaiting_pickup' | 'completed' | 'cancelled' | 'no_show';
 
@@ -19,6 +19,33 @@ export interface CreateOrderInput {
   customerNote?: string;
 }
 
+interface OrderItemSnapshot {
+  product_id: string;
+  name_snapshot: string;
+  price_cents_snapshot: number;
+  unit_snapshot: string;
+  quantity: number;
+}
+
+interface VendorOrderGroup {
+  vendorId: string;
+  marketId: string;
+  totalCents: number;
+  items: OrderItemSnapshot[];
+}
+
+const DEFAULT_PICKUP_WINDOW = 'Saturday 9:00 AM – 10:30 AM';
+const PAYMENT_METHOD = 'Pay in person at pickup (Cash, Debit, or e-Transfer)';
+
+// Columns + joins needed to serialize a full order for the client.
+const ORDER_SELECT = `
+  *,
+  vendors ( name ),
+  markets ( name ),
+  order_items ( id, product_id, name_snapshot, price_cents_snapshot, unit_snapshot, quantity )
+`;
+
+// Order status machine: everything starts awaiting pickup, and all other states are terminal.
 const LEGAL_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   awaiting_pickup: ['completed', 'cancelled', 'no_show'],
   completed: [],
@@ -26,6 +53,7 @@ const LEGAL_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   no_show: [],
 };
 
+// Human-readable label shown next to each status in the UI.
 function formatStatusLabel(status: string): string {
   switch (status) {
     case 'completed':
@@ -39,6 +67,7 @@ function formatStatusLabel(status: string): string {
   }
 }
 
+// Converts an orders row (with joins from ORDER_SELECT) into the client shape.
 export function serializeOrder(row: Record<string, unknown>) {
   const vendor = (row.vendors as Record<string, unknown> | null) || null;
   const market = (row.markets as Record<string, unknown> | null) || null;
@@ -48,7 +77,7 @@ export function serializeOrder(row: Record<string, unknown>) {
 
   return {
     id: row.id as string,
-    date: String(row.created_at || '').split('T')[0],
+    date: toDateOnly(row.created_at),
     createdAt: row.created_at as string,
     customerId: (row.customer_id as string) || null,
     customerEmail: row.customer_email as string,
@@ -63,8 +92,7 @@ export function serializeOrder(row: Record<string, unknown>) {
     totalCents: Number(row.total_cents),
     status: row.status as OrderStatus,
     statusLabel: formatStatusLabel(row.status as string),
-    paymentMethod:
-      (row.payment_method as string) || 'Pay in person at pickup (Cash, Debit, or e-Transfer)',
+    paymentMethod: (row.payment_method as string) || PAYMENT_METHOD,
     items: rawItems.map((item) => ({
       id: (item.product_id as string) || (item.id as string),
       name: item.name_snapshot as string,
@@ -75,21 +103,28 @@ export function serializeOrder(row: Record<string, unknown>) {
   };
 }
 
+// Validates basket entries and merges duplicate products into one quantity each.
+function normalizeBasket(items: CheckoutItemInput[]): Map<string, number> {
+  const requested = new Map<string, number>();
+  for (const entry of items) {
+    if (!entry || typeof entry.productId !== 'string' || !entry.productId.trim()) {
+      throw new DomainError('Invalid product identifier in basket.', 400);
+    }
+    const qty = Number(entry.quantity);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 100) {
+      throw new DomainError('Product quantities must be whole numbers between 1 and 100.', 400);
+    }
+    requested.set(entry.productId, (requested.get(entry.productId) || 0) + qty);
+  }
+  return requested;
+}
+
 export const OrderModel = {
+  // Lists orders the actor placed, plus (for vendors) orders placed at their stall.
   async listForActor(actor: Actor) {
     const db = requireSupabaseAdmin();
 
-    let query = db
-      .from('orders')
-      .select(
-        `
-        *,
-        vendors ( name ),
-        markets ( name ),
-        order_items ( id, product_id, name_snapshot, price_cents_snapshot, unit_snapshot, quantity )
-      `
-      )
-      .order('created_at', { ascending: false });
+    let query = db.from('orders').select(ORDER_SELECT).order('created_at', { ascending: false });
 
     if (actor.role === 'vendor' && actor.vendorId) {
       query = query.or(`customer_id.eq.${actor.id},vendor_id.eq.${actor.vendorId}`);
@@ -105,69 +140,38 @@ export const OrderModel = {
     return (data || []).map((row) => serializeOrder(row as Record<string, unknown>));
   },
 
+  // Checks out a cart: re-reads live prices and splits it into one order per vendor.
   async createBatch(input: CreateOrderInput, actor: Actor) {
     if (!Array.isArray(input.items) || input.items.length === 0) {
       throw new DomainError('Your pre-order basket is empty.', 400);
     }
 
-    const pickupWindow =
-      typeof input.pickupWindow === 'string' && input.pickupWindow.trim()
-        ? input.pickupWindow.trim().slice(0, 120)
-        : 'Saturday 9:00 AM – 10:30 AM';
-
-    const customerNote =
-      typeof input.customerNote === 'string' ? input.customerNote.trim().slice(0, 500) : '';
-
-    // Normalize and validate requested quantities
-    const requestedMap = new Map<string, number>();
-    for (const entry of input.items) {
-      if (!entry || typeof entry.productId !== 'string' || !entry.productId.trim()) {
-        throw new DomainError('Invalid product identifier in basket.', 400);
-      }
-      const qty = Number(entry.quantity);
-      if (!Number.isInteger(qty) || qty < 1 || qty > 100) {
-        throw new DomainError('Product quantities must be whole numbers between 1 and 100.', 400);
-      }
-      requestedMap.set(entry.productId, (requestedMap.get(entry.productId) || 0) + qty);
-    }
+    const pickupWindow = cleanString(input.pickupWindow).slice(0, 120) || DEFAULT_PICKUP_WINDOW;
+    const customerNote = cleanString(input.customerNote).slice(0, 500);
+    const requested = normalizeBasket(input.items);
 
     const db = requireSupabaseAdmin();
-    const productIds = Array.from(requestedMap.keys());
 
-    // Fetch authoritative prices, availability, and vendor/market links from DB
+    // Fetch authoritative prices, availability, and vendor/market links (never trust client prices).
     const { data: productRows, error: prodErr } = await db
       .from('products')
       .select('id, vendor_id, name, price_cents, unit, is_available, vendors ( id, name, market_id, is_approved )')
-      .in('id', productIds);
+      .in('id', Array.from(requested.keys()));
 
     if (prodErr) {
       throw new DomainError(prodErr.message, 500);
     }
 
-    const byId = new Map<string, Record<string, unknown>>();
+    const productsById = new Map<string, Record<string, unknown>>();
     for (const row of productRows || []) {
-      byId.set(row.id as string, row as Record<string, unknown>);
+      productsById.set(row.id as string, row as Record<string, unknown>);
     }
 
-    // Group validated items by vendor_id
-    const groups = new Map<
-      string,
-      {
-        vendorId: string;
-        marketId: string;
-        totalCents: number;
-        items: Array<{
-          product_id: string;
-          name_snapshot: string;
-          price_cents_snapshot: number;
-          unit_snapshot: string;
-          quantity: number;
-        }>;
-      }
-    >();
+    // Validate each product and group the line items by vendor.
+    const groups = new Map<string, VendorOrderGroup>();
 
-    for (const [productId, quantity] of requestedMap.entries()) {
-      const prod = byId.get(productId);
+    for (const [productId, quantity] of requested.entries()) {
+      const prod = productsById.get(productId);
       if (!prod) {
         throw new DomainError(`A product in your basket is no longer available (${productId}).`, 400);
       }
@@ -180,19 +184,14 @@ export const OrderModel = {
       }
 
       const vendorId = prod.vendor_id as string;
-      const marketId = vendor.market_id as string;
       const priceCents = Number(prod.price_cents);
 
-      if (!groups.has(vendorId)) {
-        groups.set(vendorId, {
-          vendorId,
-          marketId,
-          totalCents: 0,
-          items: [],
-        });
+      let group = groups.get(vendorId);
+      if (!group) {
+        group = { vendorId, marketId: vendor.market_id as string, totalCents: 0, items: [] };
+        groups.set(vendorId, group);
       }
 
-      const group = groups.get(vendorId)!;
       group.totalCents += priceCents * quantity;
       group.items.push({
         product_id: productId,
@@ -206,6 +205,7 @@ export const OrderModel = {
     const customerName = `${actor.firstName} ${actor.lastName}`.trim() || actor.email;
     const createdOrderIds: string[] = [];
 
+    // Insert one order row (plus its item snapshots) per vendor.
     for (const group of groups.values()) {
       const orderId = `ORD-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
 
@@ -220,18 +220,14 @@ export const OrderModel = {
         customer_note: customerNote,
         total_cents: group.totalCents,
         status: 'awaiting_pickup',
-        payment_method: 'Pay in person at pickup (Cash, Debit, or e-Transfer)',
+        payment_method: PAYMENT_METHOD,
       });
 
       if (orderErr) {
         throw new DomainError(orderErr.message, 500);
       }
 
-      const itemsPayload = group.items.map((item) => ({
-        order_id: orderId,
-        ...item,
-      }));
-
+      const itemsPayload = group.items.map((item) => ({ order_id: orderId, ...item }));
       const { error: itemsErr } = await db.from('order_items').insert(itemsPayload);
       if (itemsErr) {
         throw new DomainError(itemsErr.message, 500);
@@ -240,16 +236,10 @@ export const OrderModel = {
       createdOrderIds.push(orderId);
     }
 
+    // Re-read the new orders with joins so the response matches listForActor.
     const { data: hydrated, error: hydrateErr } = await db
       .from('orders')
-      .select(
-        `
-        *,
-        vendors ( name ),
-        markets ( name ),
-        order_items ( id, product_id, name_snapshot, price_cents_snapshot, unit_snapshot, quantity )
-      `
-      )
+      .select(ORDER_SELECT)
       .in('id', createdOrderIds)
       .order('created_at', { ascending: false });
 
@@ -260,6 +250,7 @@ export const OrderModel = {
     return (hydrated || []).map((row) => serializeOrder(row as Record<string, unknown>));
   },
 
+  // Moves an order to a new status, enforcing the status machine and who may make each change.
   async transition(orderId: string, targetStatus: OrderStatus, actor: Actor) {
     const db = requireSupabaseAdmin();
 
@@ -285,6 +276,7 @@ export const OrderModel = {
       );
     }
 
+    // Vendors mark pickup outcomes; only the customer can cancel.
     if (targetStatus === 'completed' || targetStatus === 'no_show') {
       if (actor.role !== 'vendor' || actor.vendorId !== existing.vendor_id) {
         throw new DomainError('Only the fulfilling vendor can update pickup completion.', 403);
@@ -295,19 +287,13 @@ export const OrderModel = {
       }
     }
 
+    // Matching on the current status guards against a concurrent transition.
     const { data: updated, error: updErr } = await db
       .from('orders')
       .update({ status: targetStatus })
       .eq('id', orderId)
       .eq('status', currentStatus)
-      .select(
-        `
-        *,
-        vendors ( name ),
-        markets ( name ),
-        order_items ( id, product_id, name_snapshot, price_cents_snapshot, unit_snapshot, quantity )
-      `
-      )
+      .select(ORDER_SELECT)
       .single();
 
     if (updErr || !updated) {

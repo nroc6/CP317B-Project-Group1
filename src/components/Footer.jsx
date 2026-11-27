@@ -5,9 +5,26 @@
 
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ShoppingBag, ShieldCheck, MapPin, Store, Lock, Heart, CheckCircle2 } from 'lucide-react';
+import { ShoppingBag, ShieldCheck, Store, Lock, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
+// Featured market links in the footer (IDs must match seeded markets).
+const FOOTER_MARKETS = [
+  { id: 'st-jacobs', label: "St. Jacobs Farmers' Market" },
+  { id: 'byward', label: 'ByWard Market (Ottawa)' },
+  { id: 'kensington', label: 'Kensington Market (Toronto)' },
+  { id: 'hamilton', label: "Hamilton Farmers' Market" },
+  { id: 'guelph', label: "Guelph Farmers' Market" },
+];
+
+const HOW_IT_WORKS_STEPS = [
+  '1. Browse local market inventory',
+  '2. Reserve harvest before sell-out',
+  '3. Pick up at stall on market morning',
+  '4. Pay the vendor in person',
+];
+
+// Site-wide footer: brand blurb, market links, how-it-works steps and Supabase status.
 export default function Footer() {
   const { isSupabaseConfigured } = useAuth();
 
@@ -38,31 +55,13 @@ export default function Footer() {
               Ontario Markets
             </h4>
             <ul className="space-y-2 text-sm text-[#FAF6EE]/80">
-              <li>
-                <Link to="/markets/st-jacobs" className="hover:text-white transition-colors">
-                  St. Jacobs Farmers' Market
-                </Link>
-              </li>
-              <li>
-                <Link to="/markets/byward" className="hover:text-white transition-colors">
-                  ByWard Market (Ottawa)
-                </Link>
-              </li>
-              <li>
-                <Link to="/markets/kensington" className="hover:text-white transition-colors">
-                  Kensington Market (Toronto)
-                </Link>
-              </li>
-              <li>
-                <Link to="/markets/hamilton" className="hover:text-white transition-colors">
-                  Hamilton Farmers' Market
-                </Link>
-              </li>
-              <li>
-                <Link to="/markets/guelph" className="hover:text-white transition-colors">
-                  Guelph Farmers' Market
-                </Link>
-              </li>
+              {FOOTER_MARKETS.map((m) => (
+                <li key={m.id}>
+                  <Link to={`/markets/${m.id}`} className="hover:text-white transition-colors">
+                    {m.label}
+                  </Link>
+                </li>
+              ))}
             </ul>
           </div>
 
@@ -72,22 +71,12 @@ export default function Footer() {
               How Basket Works
             </h4>
             <ul className="space-y-2 text-sm text-[#FAF6EE]/80">
-              <li className="flex items-center gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-[#C96F4A] shrink-0" />
-                <span>1. Browse local market inventory</span>
-              </li>
-              <li className="flex items-center gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-[#C96F4A] shrink-0" />
-                <span>2. Reserve harvest before sell-out</span>
-              </li>
-              <li className="flex items-center gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-[#C96F4A] shrink-0" />
-                <span>3. Pick up at stall on market morning</span>
-              </li>
-              <li className="flex items-center gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-[#C96F4A] shrink-0" />
-                <span>4. Pay the vendor in person</span>
-              </li>
+              {HOW_IT_WORKS_STEPS.map((step) => (
+                <li key={step} className="flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#C96F4A] shrink-0" />
+                  <span>{step}</span>
+                </li>
+              ))}
             </ul>
           </div>
 

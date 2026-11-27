@@ -3,12 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Public catalog reads (markets, approved vendors, products, reviews) straight from Supabase; protected by RLS.
+
 import heroImg from './assets/images/hero_farmers_market_1793389204533.jpg';
 import produceImg from './assets/images/market_fresh_produce_1793389203550.jpg';
 import breadImg from './assets/images/artisan_sourdough_bread_1793389204722.jpg';
 import honeyImg from './assets/images/maple_honey_preserves_1793389204233.jpg';
 import { supabase, isSupabaseConfigured } from './lib/supabase.js';
 
+// Image keys stored in the DB, mapped to bundled assets (keep in sync with ALLOWED_IMAGE_KEYS on the server).
 export const ASSET_IMAGES = {
   hero: heroImg,
   produce: produceImg,
@@ -16,6 +19,10 @@ export const ASSET_IMAGES = {
   preserves: honeyImg,
 };
 
+// Rating shown for vendors that have no reviews yet.
+const DEFAULT_RATING = { rating: 5.0, reviewCount: 0 };
+
+// Turns an image key (or https URL) into a usable src, defaulting to the produce photo.
 export function resolveAssetImage(imageKeyOrUrl) {
   if (!imageKeyOrUrl) return produceImg;
   if (ASSET_IMAGES[imageKeyOrUrl]) return ASSET_IMAGES[imageKeyOrUrl];
@@ -25,6 +32,7 @@ export function resolveAssetImage(imageKeyOrUrl) {
   return produceImg;
 }
 
+// Converts a markets row into the client shape.
 function mapMarketRow(row, vendorCount = 0) {
   const rawAnnouncement = row.announcement || null;
   const announcement = rawAnnouncement
@@ -52,7 +60,8 @@ function mapMarketRow(row, vendorCount = 0) {
   };
 }
 
-function mapVendorRow(row, ratingStats = { rating: 5.0, reviewCount: 0 }) {
+// Converts a vendors row (optionally joined with markets) into the client shape.
+function mapVendorRow(row, ratingStats = DEFAULT_RATING) {
   const market = row.markets || null;
   return {
     id: row.id,
@@ -74,7 +83,8 @@ function mapVendorRow(row, ratingStats = { rating: 5.0, reviewCount: 0 }) {
   };
 }
 
-export function mapProductRow(row) {
+// Converts a products row (integer cents) into the client shape (dollar price + image src).
+function mapProductRow(row) {
   return {
     id: row.id,
     vendorId: row.vendor_id,
@@ -90,8 +100,8 @@ export function mapProductRow(row) {
   };
 }
 
+// Converts a reviews row into the client shape.
 function mapReviewRow(row) {
-  const created = row.created_at ? String(row.created_at).split('T')[0] : 'Recent';
   return {
     id: row.id,
     vendorId: row.vendor_id,
@@ -99,12 +109,13 @@ function mapReviewRow(row) {
     customerId: row.customer_id || null,
     customerName: row.customer_name,
     verifiedOrder: true,
-    date: created,
+    date: row.created_at ? String(row.created_at).split('T')[0] : 'Recent',
     rating: Number(row.rating),
     comment: row.comment,
   };
 }
 
+// Returns the Supabase client, or throws a friendly error when env vars are missing.
 function ensureClient() {
   if (!isSupabaseConfigured || !supabase) {
     throw new Error(
@@ -114,38 +125,49 @@ function ensureClient() {
   return supabase;
 }
 
+// Throws the Supabase error (if any) so callers can just await the query.
+function throwIfError(error) {
+  if (error) throw new Error(error.message);
+}
+
+// Averages a list of numeric ratings into { rating (1 decimal), reviewCount }.
+function summarizeRatings(ratings) {
+  if (ratings.length === 0) return DEFAULT_RATING;
+  const average = ratings.reduce((sum, r) => sum + r, 0) / ratings.length;
+  return { rating: Number(average.toFixed(1)), reviewCount: ratings.length };
+}
+
+// Builds a vendorId → rating summary map, optionally limited to some vendors.
 async function computeVendorRatingMap(client, vendorIds = null) {
   let query = client.from('reviews').select('vendor_id, rating');
   if (Array.isArray(vendorIds) && vendorIds.length > 0) {
     query = query.in('vendor_id', vendorIds);
   }
   const { data } = await query;
-  const agg = new Map();
+
+  const ratingsByVendor = new Map();
   for (const row of data || []) {
-    const entry = agg.get(row.vendor_id) || { sum: 0, count: 0 };
-    entry.sum += Number(row.rating);
-    entry.count += 1;
-    agg.set(row.vendor_id, entry);
+    const list = ratingsByVendor.get(row.vendor_id) || [];
+    list.push(Number(row.rating));
+    ratingsByVendor.set(row.vendor_id, list);
   }
+
   const result = new Map();
-  for (const [vId, entry] of agg.entries()) {
-    result.set(vId, {
-      rating: Number((entry.sum / entry.count).toFixed(1)),
-      reviewCount: entry.count,
-    });
+  for (const [vendorId, ratings] of ratingsByVendor.entries()) {
+    result.set(vendorId, summarizeRatings(ratings));
   }
   return result;
 }
 
+// Lists all markets with a count of their approved vendors.
 export async function fetchMarkets() {
   const client = ensureClient();
   const [{ data: markets, error: mErr }, { data: vendors, error: vErr }] = await Promise.all([
     client.from('markets').select('*').order('name', { ascending: true }),
     client.from('vendors').select('id, market_id').eq('is_approved', true),
   ]);
-
-  if (mErr) throw new Error(mErr.message);
-  if (vErr) throw new Error(vErr.message);
+  throwIfError(mErr);
+  throwIfError(vErr);
 
   const countByMarket = new Map();
   for (const v of vendors || []) {
@@ -155,6 +177,7 @@ export async function fetchMarkets() {
   return (markets || []).map((row) => mapMarketRow(row, countByMarket.get(row.id) || 0));
 }
 
+// Loads one market and its approved vendors (with ratings); null if not found.
 export async function fetchMarketById(marketId) {
   const client = ensureClient();
   const { data: market, error: mErr } = await client
@@ -162,8 +185,7 @@ export async function fetchMarketById(marketId) {
     .select('*')
     .eq('id', marketId)
     .maybeSingle();
-
-  if (mErr) throw new Error(mErr.message);
+  throwIfError(mErr);
   if (!market) return null;
 
   const { data: vendors, error: vErr } = await client
@@ -172,20 +194,18 @@ export async function fetchMarketById(marketId) {
     .eq('market_id', marketId)
     .eq('is_approved', true)
     .order('name', { ascending: true });
+  throwIfError(vErr);
 
-  if (vErr) throw new Error(vErr.message);
-
-  const vendorIds = (vendors || []).map((v) => v.id);
-  const ratingMap = await computeVendorRatingMap(client, vendorIds);
+  const vendorRows = vendors || [];
+  const ratingMap = await computeVendorRatingMap(client, vendorRows.map((v) => v.id));
 
   return {
-    market: mapMarketRow(market, (vendors || []).length),
-    vendors: (vendors || []).map((v) =>
-      mapVendorRow(v, ratingMap.get(v.id) || { rating: 5.0, reviewCount: 0 })
-    ),
+    market: mapMarketRow(market, vendorRows.length),
+    vendors: vendorRows.map((v) => mapVendorRow(v, ratingMap.get(v.id) || DEFAULT_RATING)),
   };
 }
 
+// Lists every approved vendor with its rating.
 export async function fetchVendors() {
   const client = ensureClient();
   const { data: vendors, error } = await client
@@ -193,15 +213,13 @@ export async function fetchVendors() {
     .select('*, markets ( name )')
     .eq('is_approved', true)
     .order('name', { ascending: true });
-
-  if (error) throw new Error(error.message);
+  throwIfError(error);
 
   const ratingMap = await computeVendorRatingMap(client);
-  return (vendors || []).map((v) =>
-    mapVendorRow(v, ratingMap.get(v.id) || { rating: 5.0, reviewCount: 0 })
-  );
+  return (vendors || []).map((v) => mapVendorRow(v, ratingMap.get(v.id) || DEFAULT_RATING));
 }
 
+// Loads a vendor page: vendor, its market, products and reviews; null if not found.
 export async function fetchVendorDetail(vendorId) {
   const client = ensureClient();
   const { data: vendor, error: vErr } = await client
@@ -209,39 +227,27 @@ export async function fetchVendorDetail(vendorId) {
     .select('*, markets ( * )')
     .eq('id', vendorId)
     .maybeSingle();
-
-  if (vErr) throw new Error(vErr.message);
+  throwIfError(vErr);
   if (!vendor) return null;
 
   const [{ data: products, error: pErr }, { data: reviews, error: rErr }] = await Promise.all([
     client.from('products').select('*').eq('vendor_id', vendorId).order('created_at', { ascending: false }),
     client.from('reviews').select('*').eq('vendor_id', vendorId).order('created_at', { ascending: false }),
   ]);
-
-  if (pErr) throw new Error(pErr.message);
-  if (rErr) throw new Error(rErr.message);
+  throwIfError(pErr);
+  throwIfError(rErr);
 
   const mappedReviews = (reviews || []).map(mapReviewRow);
-  const ratingStats =
-    mappedReviews.length > 0
-      ? {
-          rating: Number(
-            (
-              mappedReviews.reduce((sum, r) => sum + r.rating, 0) / mappedReviews.length
-            ).toFixed(1)
-          ),
-          reviewCount: mappedReviews.length,
-        }
-      : { rating: 5.0, reviewCount: 0 };
 
   return {
-    vendor: mapVendorRow(vendor, ratingStats),
+    vendor: mapVendorRow(vendor, summarizeRatings(mappedReviews.map((r) => r.rating))),
     market: vendor.markets ? mapMarketRow(vendor.markets) : null,
     products: (products || []).map(mapProductRow),
     reviews: mappedReviews,
   };
 }
 
+// Lists a vendor's products, newest first (used by the vendor dashboard).
 export async function fetchProductsByVendor(vendorId) {
   const client = ensureClient();
   const { data, error } = await client
@@ -249,11 +255,11 @@ export async function fetchProductsByVendor(vendorId) {
     .select('*')
     .eq('vendor_id', vendorId)
     .order('created_at', { ascending: false });
-
-  if (error) throw new Error(error.message);
+  throwIfError(error);
   return (data || []).map(mapProductRow);
 }
 
+// Case-insensitive substring search over markets and products (filtered client-side).
 export async function searchCatalog(queryText) {
   const client = ensureClient();
   const clean = (queryText || '').trim().toLowerCase();
@@ -266,33 +272,16 @@ export async function searchCatalog(queryText) {
     fetchVendors(),
     client.from('products').select('*').order('created_at', { ascending: false }),
   ]);
+  throwIfError(pErr);
 
-  if (pErr) throw new Error(pErr.message);
-
-  const matchingMarkets = markets.filter(
-    (m) =>
-      m.name.toLowerCase().includes(clean) ||
-      m.city.toLowerCase().includes(clean) ||
-      m.region.toLowerCase().includes(clean) ||
-      m.description.toLowerCase().includes(clean)
-  );
-
-  const vendorsById = Object.fromEntries(vendors.map((v) => [v.id, v]));
-  const marketsById = Object.fromEntries(markets.map((m) => [m.id, m]));
-
-  const matchingProducts = (productRows || [])
-    .map(mapProductRow)
-    .filter(
-      (p) =>
-        p.name.toLowerCase().includes(clean) ||
-        p.category.toLowerCase().includes(clean) ||
-        p.description.toLowerCase().includes(clean)
-    );
+  const matches = (...fields) => fields.some((f) => (f || '').toLowerCase().includes(clean));
 
   return {
-    markets: matchingMarkets,
-    products: matchingProducts,
-    vendorsById,
-    marketsById,
+    markets: markets.filter((m) => matches(m.name, m.city, m.region, m.description)),
+    products: (productRows || [])
+      .map(mapProductRow)
+      .filter((p) => matches(p.name, p.category, p.description)),
+    vendorsById: Object.fromEntries(vendors.map((v) => [v.id, v])),
+    marketsById: Object.fromEntries(markets.map((m) => [m.id, m])),
   };
 }

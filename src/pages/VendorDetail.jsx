@@ -23,11 +23,14 @@ import { apiRequest } from '../lib/supabase.js';
 import ProductCard from '../components/ProductCard.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
+import { useFavouriteToggle } from '../hooks/useFavouriteToggle.js';
 
+// /vendors/:id — vendor profile, product catalogue (filterable) and verified reviews.
 export default function VendorDetail() {
   const { id } = useParams();
-  const { isAuthenticated, accessToken, isFavourite, toggleFavourite, orders } = useAuth();
+  const { isAuthenticated, accessToken, isFavourite, orders } = useAuth();
   const { addToast } = useToast();
+  const toggleFav = useFavouriteToggle();
 
   const [vendor, setVendor] = useState(null);
   const [market, setMarket] = useState(null);
@@ -43,6 +46,7 @@ export default function VendorDetail() {
   const [newComment, setNewComment] = useState('');
   const [submittingReview, setSubmittingReview] = useState(false);
 
+  // Load the vendor page whenever the URL id changes; `active` ignores stale responses.
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -85,12 +89,14 @@ export default function VendorDetail() {
     );
   }, [orders, reviews, vendor, isAuthenticated]);
 
+  // Default the review form to the first reviewable order.
   useEffect(() => {
     if (eligibleOrders.length > 0 && !selectedOrderId) {
       setSelectedOrderId(eligibleOrders[0].id);
     }
   }, [eligibleOrders, selectedOrderId]);
 
+  // Category filter chips, plus the products matching the selected one.
   const categories = useMemo(() => {
     return ['all', ...Array.from(new Set(products.map((p) => p.category || 'General')))];
   }, [products]);
@@ -102,20 +108,9 @@ export default function VendorDetail() {
 
   const isFav = vendor ? isFavourite(vendor.id) : false;
 
-  const handleToggleFav = async () => {
-    if (!vendor) return;
-    if (!isAuthenticated) {
-      addToast('Log in to save favourite stalls.', 'info');
-      return;
-    }
-    try {
-      const saved = await toggleFavourite(vendor.id, 'vendor');
-      addToast(saved ? `Added ${vendor.name} to favourites!` : `Removed ${vendor.name} from favourites`);
-    } catch (err) {
-      addToast(err.message || 'Could not update favourites.', 'error');
-    }
-  };
+  const handleToggleFav = () => toggleFav(vendor, 'vendor');
 
+  // Submits a verified review for the selected completed order.
   const handleAddReview = async (e) => {
     e.preventDefault();
     if (!accessToken || !vendor) {

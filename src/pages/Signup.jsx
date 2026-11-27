@@ -9,6 +9,7 @@ import { ShoppingBag, Lock, Mail, User, ArrowRight, Store, AlertCircle, Info, Ch
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+// /signup — customer or vendor registration form.
 export default function Signup() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
@@ -25,6 +26,7 @@ export default function Signup() {
   const { addToast } = useToast();
   const navigate = useNavigate();
 
+  // Validates the form, creates the account, then routes by role (or shows the confirm-email screen).
   const handleSignup = async (e) => {
     e.preventDefault();
     if (isSubmitting) return;
@@ -81,6 +83,7 @@ export default function Signup() {
     }
   };
 
+  // Shown instead of the form when Supabase requires email confirmation.
   if (confirmationEmail) {
     return (
       <div className="min-h-[75vh] flex items-center justify-center px-4 py-12">

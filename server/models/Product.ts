@@ -4,8 +4,9 @@
  */
 
 import { requireSupabaseAdmin } from '../supabaseAdmin.ts';
-import { type Actor, DomainError } from './types.ts';
+import { type Actor, DomainError, cleanString } from './types.ts';
 
+// Must stay in sync with the image/category options in the vendor dashboard UI.
 const ALLOWED_IMAGE_KEYS = new Set(['produce', 'bakery', 'preserves', 'hero']);
 const ALLOWED_CATEGORIES = new Set([
   'Produce',
@@ -25,6 +26,7 @@ export interface ProductInput {
   imageKey?: string;
 }
 
+// Converts a products DB row (integer cents) into the client shape (dollar price).
 export function serializeProduct(row: Record<string, unknown>) {
   return {
     id: row.id as string,
@@ -41,6 +43,7 @@ export function serializeProduct(row: Record<string, unknown>) {
   };
 }
 
+// Throws unless the actor is an approved vendor; returns their vendor ID.
 function assertApprovedVendor(actor: Actor): string {
   if (actor.role !== 'vendor' || !actor.vendorId) {
     throw new DomainError('Only vendor accounts can manage stall inventory.', 403);
@@ -54,18 +57,20 @@ function assertApprovedVendor(actor: Actor): string {
   return actor.vendorId;
 }
 
+// Validates client input into DB columns; on update, only fields that were sent are included.
 function validateProductFields(input: Partial<ProductInput>, isCreate: boolean) {
   const clean: Record<string, unknown> = {};
+  const has = (field: keyof ProductInput) => isCreate || input[field] !== undefined;
 
-  if (isCreate || input.name !== undefined) {
-    const name = typeof input.name === 'string' ? input.name.trim() : '';
+  if (has('name')) {
+    const name = cleanString(input.name);
     if (!name || name.length > 120) {
       throw new DomainError('Product name is required (max 120 characters).', 400);
     }
     clean.name = name;
   }
 
-  if (isCreate || input.price !== undefined) {
+  if (has('price')) {
     const price = Number(input.price);
     if (!Number.isFinite(price) || price <= 0 || price > 10000) {
       throw new DomainError('Product price must be a positive number.', 400);
@@ -73,40 +78,63 @@ function validateProductFields(input: Partial<ProductInput>, isCreate: boolean) 
     clean.price_cents = Math.round(price * 100);
   }
 
-  if (isCreate || input.unit !== undefined) {
-    const unit = typeof input.unit === 'string' ? input.unit.trim() : '';
+  if (has('unit')) {
+    const unit = cleanString(input.unit);
     if (!unit || unit.length > 50) {
       throw new DomainError('Unit is required (max 50 characters).', 400);
     }
     clean.unit = unit;
   }
 
-  if (isCreate || input.category !== undefined) {
-    const category = typeof input.category === 'string' ? input.category.trim() : 'Produce';
+  // Unknown categories / image keys fall back to safe defaults instead of erroring.
+  if (has('category')) {
+    const category = cleanString(input.category, 'Produce');
     clean.category = ALLOWED_CATEGORIES.has(category) ? category : 'Produce';
   }
 
-  if (isCreate || input.description !== undefined) {
-    const description = typeof input.description === 'string' ? input.description.trim() : '';
+  if (has('description')) {
+    const description = cleanString(input.description);
     if (description.length > 1000) {
       throw new DomainError('Description must be under 1000 characters.', 400);
     }
     clean.description = description;
   }
 
-  if (isCreate || input.isAvailable !== undefined) {
+  if (has('isAvailable')) {
     clean.is_available = input.isAvailable !== false;
   }
 
-  if (isCreate || input.imageKey !== undefined) {
-    const key = typeof input.imageKey === 'string' ? input.imageKey.trim() : 'produce';
+  if (has('imageKey')) {
+    const key = cleanString(input.imageKey, 'produce');
     clean.image_key = ALLOWED_IMAGE_KEYS.has(key) ? key : 'produce';
   }
 
   return clean;
 }
 
+// Loads a product and throws 404/403 unless it belongs to the given vendor.
+async function fetchOwnedProduct(productId: string, vendorId: string) {
+  const db = requireSupabaseAdmin();
+  const { data: existing, error } = await db
+    .from('products')
+    .select('*')
+    .eq('id', productId)
+    .maybeSingle();
+
+  if (error) {
+    throw new DomainError(error.message, 500);
+  }
+  if (!existing) {
+    throw new DomainError('Product not found.', 404);
+  }
+  if (existing.vendor_id !== vendorId) {
+    throw new DomainError('You do not own this product.', 403);
+  }
+  return existing as Record<string, unknown>;
+}
+
 export const ProductModel = {
+  // Adds a new product to the actor's stall.
   async create(input: ProductInput, actor: Actor) {
     const vendorId = assertApprovedVendor(actor);
     const fields = validateProductFields(input, true);
@@ -114,11 +142,7 @@ export const ProductModel = {
 
     const { data, error } = await db
       .from('products')
-      .insert({
-        id: `p-${crypto.randomUUID()}`,
-        vendor_id: vendorId,
-        ...fields,
-      })
+      .insert({ id: `p-${crypto.randomUUID()}`, vendor_id: vendorId, ...fields })
       .select('*')
       .single();
 
@@ -128,32 +152,17 @@ export const ProductModel = {
     return serializeProduct(data);
   },
 
+  // Applies a partial update to a product the actor owns.
   async update(productId: string, input: Partial<ProductInput>, actor: Actor) {
     const vendorId = assertApprovedVendor(actor);
-    const db = requireSupabaseAdmin();
-
-    const { data: existing, error: fetchError } = await db
-      .from('products')
-      .select('*')
-      .eq('id', productId)
-      .maybeSingle();
-
-    if (fetchError) {
-      throw new DomainError(fetchError.message, 500);
-    }
-    if (!existing) {
-      throw new DomainError('Product not found.', 404);
-    }
-    if (existing.vendor_id !== vendorId) {
-      throw new DomainError('You do not own this product.', 403);
-    }
+    const existing = await fetchOwnedProduct(productId, vendorId);
 
     const updates = validateProductFields(input, false);
     if (Object.keys(updates).length === 0) {
       return serializeProduct(existing);
     }
 
-    const { data, error } = await db
+    const { data, error } = await requireSupabaseAdmin()
       .from('products')
       .update(updates)
       .eq('id', productId)
@@ -167,31 +176,12 @@ export const ProductModel = {
     return serializeProduct(data);
   },
 
-  async toggleAvailability(productId: string, isAvailable: boolean, actor: Actor) {
-    return ProductModel.update(productId, { isAvailable: Boolean(isAvailable) }, actor);
-  },
-
+  // Deletes a product the actor owns.
   async remove(productId: string, actor: Actor) {
     const vendorId = assertApprovedVendor(actor);
-    const db = requireSupabaseAdmin();
+    await fetchOwnedProduct(productId, vendorId);
 
-    const { data: existing, error: fetchError } = await db
-      .from('products')
-      .select('id, vendor_id')
-      .eq('id', productId)
-      .maybeSingle();
-
-    if (fetchError) {
-      throw new DomainError(fetchError.message, 500);
-    }
-    if (!existing) {
-      throw new DomainError('Product not found.', 404);
-    }
-    if (existing.vendor_id !== vendorId) {
-      throw new DomainError('You do not own this product.', 403);
-    }
-
-    const { error } = await db
+    const { error } = await requireSupabaseAdmin()
       .from('products')
       .delete()
       .eq('id', productId)

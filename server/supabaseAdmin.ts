@@ -10,29 +10,17 @@ dotenv.config();
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
 
 export const isServerSupabaseConfigured = Boolean(supabaseUrl && supabaseServiceKey);
 
+// Service-role client: bypasses RLS, so models must enforce authorization themselves.
 export const supabaseAdmin: SupabaseClient | null = isServerSupabaseConfigured
   ? createClient(supabaseUrl, supabaseServiceKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
+      auth: { autoRefreshToken: false, persistSession: false },
     })
   : null;
 
-export const supabasePublicAuthClient: SupabaseClient | null =
-  supabaseUrl && (supabaseAnonKey || supabaseServiceKey)
-    ? createClient(supabaseUrl, supabaseAnonKey || supabaseServiceKey, {
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false,
-        },
-      })
-    : null;
-
+// Returns the admin client, or throws a 503 when server credentials are missing.
 export function requireSupabaseAdmin(): SupabaseClient {
   if (!supabaseAdmin) {
     const err = new Error(

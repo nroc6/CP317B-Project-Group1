@@ -8,25 +8,34 @@ import { supabase, isSupabaseConfigured, apiRequest } from '../lib/supabase.js';
 
 const AuthContext = createContext(null);
 
+// The unsubmitted cart is the only state still kept in localStorage.
 const CART_STORAGE_KEY = 'basket_cart_items';
+const DEMO_EMAILS = ['customer@basket.ca', 'vendor@basket.ca'];
+const NOT_CONFIGURED_RESULT = {
+  success: false,
+  error: 'Supabase is not configured. Check your .env file.',
+};
 
+// Reads the saved cart from localStorage, falling back to an empty cart.
+function loadStoredCart() {
+  try {
+    const stored = localStorage.getItem(CART_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Holds the session, signed-in actor, orders, favourites and cart for the whole app.
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [orders, setOrders] = useState([]);
   const [favourites, setFavourites] = useState([]);
+  const [cart, setCart] = useState(loadStoredCart);
 
-  // Unsubmitted shopping cart remains local until submitted to POST /api/orders
-  const [cart, setCart] = useState(() => {
-    try {
-      const stored = localStorage.getItem(CART_STORAGE_KEY);
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
-  });
-
+  // Persist the cart whenever it changes.
   useEffect(() => {
     try {
       localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cart));
@@ -35,27 +44,37 @@ export function AuthProvider({ children }) {
     }
   }, [cart]);
 
-  const hydrateAuthenticatedState = useCallback(async (activeSession) => {
-    if (!activeSession?.access_token) {
-      setUser(null);
-      setOrders([]);
-      setFavourites([]);
-      return null;
-    }
-
-    const token = activeSession.access_token;
-    const [meRes, ordersRes, favsRes] = await Promise.all([
-      apiRequest('/api/me', {}, token),
-      apiRequest('/api/orders', {}, token).catch(() => ({ orders: [] })),
-      apiRequest('/api/favourites', {}, token).catch(() => ({ favourites: [] })),
-    ]);
-
-    setUser(meRes.user || null);
-    setOrders(ordersRes.orders || []);
-    setFavourites(favsRes.favourites || []);
-    return meRes.user || null;
+  // Drops all per-user data (used on sign-out and when the session ends).
+  const clearPrivateState = useCallback(() => {
+    setUser(null);
+    setOrders([]);
+    setFavourites([]);
   }, []);
 
+  // Loads the actor profile, orders and favourites from the API for a session.
+  const hydrateAuthenticatedState = useCallback(
+    async (activeSession) => {
+      if (!activeSession?.access_token) {
+        clearPrivateState();
+        return null;
+      }
+
+      const token = activeSession.access_token;
+      const [meRes, ordersRes, favsRes] = await Promise.all([
+        apiRequest('/api/me', {}, token),
+        apiRequest('/api/orders', {}, token).catch(() => ({ orders: [] })),
+        apiRequest('/api/favourites', {}, token).catch(() => ({ favourites: [] })),
+      ]);
+
+      setUser(meRes.user || null);
+      setOrders(ordersRes.orders || []);
+      setFavourites(favsRes.favourites || []);
+      return meRes.user || null;
+    },
+    [clearPrivateState]
+  );
+
+  // Restore any existing session on load, then keep in sync with Supabase auth events.
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) {
       setAuthLoading(false);
@@ -90,9 +109,7 @@ export function AuthProvider({ children }) {
           console.error('Failed to refresh actor state:', err);
         });
       } else {
-        setUser(null);
-        setOrders([]);
-        setFavourites([]);
+        clearPrivateState();
       }
     });
 
@@ -100,10 +117,11 @@ export function AuthProvider({ children }) {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, [hydrateAuthenticatedState]);
+  }, [hydrateAuthenticatedState, clearPrivateState]);
 
   const accessToken = session?.access_token || null;
 
+  // Re-fetches the actor's orders from the API.
   const refreshOrders = useCallback(async () => {
     if (!accessToken) return [];
     const data = await apiRequest('/api/orders', {}, accessToken);
@@ -111,34 +129,22 @@ export function AuthProvider({ children }) {
     return data.orders || [];
   }, [accessToken]);
 
+  // Signs in with email/password; returns { success, user } or { success: false, error }.
   const login = useCallback(
     async (email, password) => {
-      if (!isSupabaseConfigured || !supabase) {
-        return {
-          success: false,
-          error: 'Supabase is not configured. Check your .env file.',
-        };
-      }
+      if (!isSupabaseConfigured || !supabase) return NOT_CONFIGURED_RESULT;
 
       const normalizedEmail = email.trim().toLowerCase();
-      let signInRes = await supabase.auth.signInWithPassword({
-        email: normalizedEmail,
-        password,
-      });
+      const signIn = () => supabase.auth.signInWithPassword({ email: normalizedEmail, password });
+      let signInRes = await signIn();
 
-      // Automatically provision demo accounts in Supabase Auth if using demo credentials for the first time
-      if (
-        signInRes.error &&
-        (normalizedEmail === 'customer@basket.ca' || normalizedEmail === 'vendor@basket.ca')
-      ) {
+      // First demo login: ask the server to create the demo accounts, then retry once.
+      if (signInRes.error && DEMO_EMAILS.includes(normalizedEmail)) {
         try {
           await apiRequest('/api/demo/ensure-accounts', { method: 'POST' });
-          signInRes = await supabase.auth.signInWithPassword({
-            email: normalizedEmail,
-            password,
-          });
+          signInRes = await signIn();
         } catch {
-          // Ignore bootstrap error and surface original sign-in error
+          // Ignore bootstrap errors and surface the original sign-in error.
         }
       }
 
@@ -156,18 +162,13 @@ export function AuthProvider({ children }) {
     [hydrateAuthenticatedState]
   );
 
+  // Creates a Supabase Auth user; profile/vendor rows are created by DB triggers from the metadata.
   const signup = useCallback(
     async ({ firstName, lastName, email, password, role, vendorName }) => {
-      if (!isSupabaseConfigured || !supabase) {
-        return {
-          success: false,
-          error: 'Supabase is not configured. Check your .env file.',
-        };
-      }
+      if (!isSupabaseConfigured || !supabase) return NOT_CONFIGURED_RESULT;
 
-      const normalizedEmail = email.trim().toLowerCase();
       const { data, error } = await supabase.auth.signUp({
-        email: normalizedEmail,
+        email: email.trim().toLowerCase(),
         password,
         options: {
           data: {
@@ -183,12 +184,9 @@ export function AuthProvider({ children }) {
         return { success: false, error: error.message };
       }
 
+      // No session means the project requires email confirmation first.
       if (!data.session) {
-        return {
-          success: true,
-          requiresEmailConfirmation: true,
-          user: null,
-        };
+        return { success: true, requiresEmailConfirmation: true, user: null };
       }
 
       setSession(data.session);
@@ -198,33 +196,29 @@ export function AuthProvider({ children }) {
     [hydrateAuthenticatedState]
   );
 
+  // Signs out and clears all per-user state.
   const logout = useCallback(async () => {
     if (supabase) {
       await supabase.auth.signOut();
     }
     setSession(null);
-    setUser(null);
-    setOrders([]);
-    setFavourites([]);
-  }, []);
+    clearPrivateState();
+  }, [clearPrivateState]);
 
+  // Deletes the account on the server, then signs out and empties the cart.
   const deleteAccount = useCallback(async () => {
     if (!accessToken) {
       throw new Error('You must be signed in to delete your account.');
     }
     await apiRequest('/api/account', { method: 'DELETE' }, accessToken);
-    if (supabase) {
-      await supabase.auth.signOut();
-    }
-    setSession(null);
-    setUser(null);
-    setOrders([]);
-    setFavourites([]);
+    await logout();
     setCart([]);
     localStorage.removeItem(CART_STORAGE_KEY);
-  }, [accessToken]);
+  }, [accessToken, logout]);
 
-  // Client-side unsubmitted cart operations
+  // --- Cart (client-side until checkout) ---
+
+  // Adds a product to the cart, or bumps its quantity if it's already there.
   const addToCart = useCallback((product, vendor, market, quantity = 1) => {
     setCart((prev) => {
       const existingIndex = prev.findIndex((item) => item.productId === product.id);
@@ -260,6 +254,7 @@ export function AuthProvider({ children }) {
     setCart((prev) => prev.filter((item) => item.id !== cartItemId));
   }, []);
 
+  // Sets an item's quantity; zero or less removes it.
   const updateCartQuantity = useCallback(
     (cartItemId, quantity) => {
       if (quantity <= 0) {
@@ -277,7 +272,9 @@ export function AuthProvider({ children }) {
     setCart([]);
   }, []);
 
-  // Authoritative server-side pre-order creation (computes prices & splits by vendor)
+  // --- Orders & favourites (server-authoritative) ---
+
+  // Submits the cart; the server re-prices it and returns one order per vendor.
   const placePreOrder = useCallback(
     async ({ pickupWindow, customerNote }) => {
       if (cart.length === 0) return null;
@@ -288,18 +285,12 @@ export function AuthProvider({ children }) {
       const payload = {
         pickupWindow,
         customerNote,
-        items: cart.map((item) => ({
-          productId: item.productId,
-          quantity: item.quantity,
-        })),
+        items: cart.map((item) => ({ productId: item.productId, quantity: item.quantity })),
       };
 
       const res = await apiRequest(
         '/api/orders',
-        {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        },
+        { method: 'POST', body: JSON.stringify(payload) },
         accessToken
       );
 
@@ -311,6 +302,7 @@ export function AuthProvider({ children }) {
     [cart, accessToken, clearCart]
   );
 
+  // Changes an order's status (complete / no-show / cancel) and updates it locally.
   const transitionOrderStatus = useCallback(
     async (orderId, targetStatus) => {
       if (!accessToken) {
@@ -318,10 +310,7 @@ export function AuthProvider({ children }) {
       }
       const res = await apiRequest(
         `/api/orders/${encodeURIComponent(orderId)}/status`,
-        {
-          method: 'PATCH',
-          body: JSON.stringify({ status: targetStatus }),
-        },
+        { method: 'PATCH', body: JSON.stringify({ status: targetStatus }) },
         accessToken
       );
       const updated = res.order;
@@ -331,7 +320,7 @@ export function AuthProvider({ children }) {
     [accessToken]
   );
 
-  // Authenticated favourites toggle
+  // Saves or un-saves a market/vendor; returns true if it's now saved.
   const toggleFavourite = useCallback(
     async (targetId, targetType = 'market') => {
       if (!accessToken) {
@@ -339,10 +328,7 @@ export function AuthProvider({ children }) {
       }
       const res = await apiRequest(
         '/api/favourites/toggle',
-        {
-          method: 'POST',
-          body: JSON.stringify({ targetType, targetId }),
-        },
+        { method: 'POST', body: JSON.stringify({ targetType, targetId }) },
         accessToken
       );
       setFavourites((prev) => {
@@ -397,6 +383,7 @@ export function AuthProvider({ children }) {
   );
 }
 
+// Hook for reading auth/cart state; must be used inside <AuthProvider>.
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {

@@ -7,34 +7,22 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { MapPin, Clock, Calendar, Store, Heart, ArrowRight } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
-import { useToast } from '../context/ToastContext.jsx';
+import { useFavouriteToggle } from '../hooks/useFavouriteToggle.js';
 
+// Card for one market: photo, hours, season, vendor count and a favourite toggle.
 export default function MarketCard({ market }) {
-  const { isAuthenticated, isFavourite, toggleFavourite } = useAuth();
-  const { addToast } = useToast();
+  const { isFavourite } = useAuth();
+  const toggleFav = useFavouriteToggle();
   const isFav = isFavourite(market.id);
 
-  const handleFavoriteClick = async (e) => {
+  // Toggles the favourite without following the card's link.
+  const handleFavoriteClick = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!isAuthenticated) {
-      addToast('Log in to save favourite markets.', 'info');
-      return;
-    }
-    try {
-      const saved = await toggleFavourite(market.id, 'market');
-      addToast(saved ? `Added ${market.name} to favourites!` : `Removed ${market.name} from favourites`);
-    } catch (err) {
-      addToast(err.message || 'Could not update favourite.', 'error');
-    }
+    toggleFav(market, 'market');
   };
 
-  const vendorTotal =
-    typeof market.vendorCount === 'number'
-      ? market.vendorCount
-      : market.vendorIds
-      ? market.vendorIds.length
-      : 0;
+  const vendorTotal = market.vendorCount || 0;
 
   return (
     <div className="group bg-white rounded-3xl border border-[#2F5D3A]/15 overflow-hidden shadow-xs hover:shadow-md transition-all duration-200 flex flex-col justify-between">

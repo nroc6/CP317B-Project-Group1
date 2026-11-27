@@ -5,36 +5,35 @@
 
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { 
-  ShoppingBag, 
-  Trash2, 
-  Plus, 
-  Minus, 
-  Clock, 
-  MapPin, 
-  ShieldCheck, 
-  Store, 
-  CheckCircle2, 
+import {
+  ShoppingBag,
+  Trash2,
+  Plus,
+  Minus,
+  Clock,
+  MapPin,
+  ShieldCheck,
+  Store,
+  CheckCircle2,
   ArrowRight,
   ArrowLeft,
-  Calendar,
-  AlertCircle
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+// /cart — review the basket grouped by vendor, choose a pickup window and place the pre-order.
 export default function Cart() {
-  const { 
-    cart, 
-    cartTotal, 
-    cartItemCount, 
-    updateCartQuantity, 
-    removeFromCart, 
+  const {
+    cart,
+    cartTotal,
+    cartItemCount,
+    updateCartQuantity,
+    removeFromCart,
     placePreOrder,
     isAuthenticated,
     authLoading,
   } = useAuth();
-  
+
   const { addToast } = useToast();
   const navigate = useNavigate();
 
@@ -62,7 +61,7 @@ export default function Cart() {
 
   if (!isAuthenticated) return null;
 
-  // Group cart items by vendor
+  // Group cart items by vendor (the server creates one order per vendor).
   const itemsByVendor = cart.reduce((acc, item) => {
     const key = item.vendorId || 'general';
     if (!acc[key]) {
@@ -77,6 +76,7 @@ export default function Cart() {
     return acc;
   }, {});
 
+  // Submits the cart and switches to the success screen with the created orders.
   const handlePlaceOrder = async (e) => {
     e.preventDefault();
     if (cart.length === 0 || submitting) return;

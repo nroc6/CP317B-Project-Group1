@@ -22,6 +22,7 @@ import Cart from './pages/Cart.jsx';
 import SearchResults from './pages/SearchResults.jsx';
 import Favourites from './pages/Favourites.jsx';
 
+// Root component: global providers, page layout and client-side routes.
 export default function App() {
   return (
     <ToastProvider>

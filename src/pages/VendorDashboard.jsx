@@ -23,6 +23,30 @@ import { apiRequest } from '../lib/supabase.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+// Options for the product form; must match ALLOWED_CATEGORIES / ALLOWED_IMAGE_KEYS in server/models/Product.ts.
+const CATEGORY_OPTIONS = ['Produce', 'Bakery', 'Honey & Preserves', 'Dairy & Cheese', 'Meats & Dairy'];
+const IMAGE_OPTIONS = [
+  { key: 'produce', label: 'Fresh Produce Crate' },
+  { key: 'bakery', label: 'Artisan Hearth Bread' },
+  { key: 'preserves', label: 'Maple & Wildflower Honey' },
+  { key: 'hero', label: 'Market Morning Stall' },
+];
+
+// Blank add/edit product form.
+const EMPTY_FORM = {
+  name: '',
+  price: '',
+  unit: 'each',
+  category: 'Produce',
+  description: '',
+  isAvailable: true,
+  imageKey: 'produce',
+};
+
+// Adds the resolved image src to a product returned by the API.
+const withImage = (product) => ({ ...product, image: resolveAssetImage(product.imageKey) });
+
+// /dashboard — vendor-only page to manage stall inventory and incoming pickup orders.
 export default function VendorDashboard() {
   const {
     user,
@@ -36,6 +60,7 @@ export default function VendorDashboard() {
   const { addToast } = useToast();
   const navigate = useNavigate();
 
+  // Only signed-in vendors may stay on this page.
   useEffect(() => {
     if (authLoading) return;
     if (!isAuthenticated) {
@@ -55,19 +80,15 @@ export default function VendorDashboard() {
   const [isAddingProduct, setIsAddingProduct] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
 
-  // Form state
-  const [formName, setFormName] = useState('');
-  const [formPrice, setFormPrice] = useState('');
-  const [formUnit, setFormUnit] = useState('each');
-  const [formCategory, setFormCategory] = useState('Produce');
-  const [formDescription, setFormDescription] = useState('');
-  const [formIsAvailable, setFormIsAvailable] = useState(true);
-  const [formImageKey, setFormImageKey] = useState('produce');
+  // Add/edit product form values.
+  const [form, setForm] = useState(EMPTY_FORM);
+  const updateForm = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
 
   const vendorId = user?.vendorId || '';
   const vendorName = user?.vendorName || 'Vendor Stall';
   const isApproved = Boolean(user?.isApproved);
 
+  // Load this vendor's products (including sold-out ones).
   useEffect(() => {
     if (!vendorId) {
       setLoadingProducts(false);
@@ -96,6 +117,7 @@ export default function VendorDashboard() {
     return orders.filter((o) => o.vendorId === vendorId);
   }, [orders, vendorId]);
 
+  // Orders still waiting for pickup, and their combined value.
   const pendingOrders = useMemo(
     () => vendorOrders.filter((o) => o.status === 'awaiting_pickup'),
     [vendorOrders]
@@ -106,40 +128,39 @@ export default function VendorDashboard() {
     [pendingOrders]
   );
 
+  // Opens the form pre-filled with an existing product.
   const startEdit = (product) => {
     setEditingProduct(product);
-    setFormName(product.name);
-    setFormPrice(product.price.toString());
-    setFormUnit(product.unit);
-    setFormCategory(product.category || 'Produce');
-    setFormDescription(product.description || '');
-    setFormIsAvailable(product.isAvailable !== false);
-    setFormImageKey(product.imageKey || 'produce');
+    setForm({
+      name: product.name,
+      price: product.price.toString(),
+      unit: product.unit,
+      category: product.category || 'Produce',
+      description: product.description || '',
+      isAvailable: product.isAvailable !== false,
+      imageKey: product.imageKey || 'produce',
+    });
     setIsAddingProduct(true);
   };
 
+  // Clears and closes the form.
   const resetForm = () => {
     setEditingProduct(null);
-    setFormName('');
-    setFormPrice('');
-    setFormUnit('each');
-    setFormCategory('Produce');
-    setFormDescription('');
-    setFormIsAvailable(true);
-    setFormImageKey('produce');
+    setForm(EMPTY_FORM);
     setIsAddingProduct(false);
   };
 
+  // Creates or updates a product via the API (the server re-validates everything).
   const handleSaveProduct = async (e) => {
     e.preventDefault();
     if (!accessToken) return;
 
-    if (!formName.trim() || !formPrice) {
+    if (!form.name.trim() || !form.price) {
       addToast('Please enter both a product name and price.', 'error');
       return;
     }
 
-    const priceNum = parseFloat(formPrice);
+    const priceNum = parseFloat(form.price);
     if (isNaN(priceNum) || priceNum <= 0) {
       addToast('Please enter a valid positive price.', 'error');
       return;
@@ -148,13 +169,13 @@ export default function VendorDashboard() {
     setSaving(true);
     try {
       const body = {
-        name: formName.trim(),
+        name: form.name.trim(),
         price: priceNum,
-        unit: formUnit.trim(),
-        category: formCategory,
-        description: formDescription.trim(),
-        isAvailable: formIsAvailable,
-        imageKey: formImageKey,
+        unit: form.unit.trim(),
+        category: form.category,
+        description: form.description.trim(),
+        isAvailable: form.isAvailable,
+        imageKey: form.imageKey,
       };
 
       if (editingProduct) {
@@ -163,10 +184,7 @@ export default function VendorDashboard() {
           { method: 'PATCH', body: JSON.stringify(body) },
           accessToken
         );
-        const updatedItem = {
-          ...res.product,
-          image: resolveAssetImage(res.product.imageKey),
-        };
+        const updatedItem = withImage(res.product);
         setMyProducts((prev) => prev.map((p) => (p.id === updatedItem.id ? updatedItem : p)));
         addToast(`Updated "${updatedItem.name}". Public vendor page updated!`);
       } else {
@@ -175,10 +193,7 @@ export default function VendorDashboard() {
           { method: 'POST', body: JSON.stringify(body) },
           accessToken
         );
-        const createdItem = {
-          ...res.product,
-          image: resolveAssetImage(res.product.imageKey),
-        };
+        const createdItem = withImage(res.product);
         setMyProducts((prev) => [createdItem, ...prev]);
         addToast(`Added "${createdItem.name}" to this week's inventory!`);
       }
@@ -190,22 +205,17 @@ export default function VendorDashboard() {
     }
   };
 
+  // Flips a product between available and sold out.
   const toggleAvailability = async (product) => {
     if (!accessToken) return;
     try {
-      const nextState = !(product.isAvailable !== false);
+      const nextState = product.isAvailable === false;
       const res = await apiRequest(
         `/api/products/${encodeURIComponent(product.id)}`,
-        {
-          method: 'PATCH',
-          body: JSON.stringify({ isAvailable: nextState }),
-        },
+        { method: 'PATCH', body: JSON.stringify({ isAvailable: nextState }) },
         accessToken
       );
-      const updatedItem = {
-        ...res.product,
-        image: resolveAssetImage(res.product.imageKey),
-      };
+      const updatedItem = withImage(res.product);
       setMyProducts((prev) => prev.map((p) => (p.id === updatedItem.id ? updatedItem : p)));
       addToast(
         nextState
@@ -217,6 +227,7 @@ export default function VendorDashboard() {
     }
   };
 
+  // Deletes a product after a confirm prompt.
   const handleDeleteProduct = async (productId, productName) => {
     if (!accessToken) return;
     if (!window.confirm(`Are you sure you want to remove "${productName}" from your inventory?`)) {
@@ -236,6 +247,7 @@ export default function VendorDashboard() {
     }
   };
 
+  // Marks an order as picked up (completed) or no-show.
   const handleOrderTransition = async (orderId, targetStatus) => {
     try {
       await transitionOrderStatus(orderId, targetStatus);
@@ -399,8 +411,8 @@ export default function VendorDashboard() {
                 <input
                   type="text"
                   required
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
+                  value={form.name}
+                  onChange={(e) => updateForm('name', e.target.value)}
                   placeholder="e.g. Heirloom Yellow Plum Tomatoes"
                   className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
                 />
@@ -411,15 +423,15 @@ export default function VendorDashboard() {
                   Category *
                 </label>
                 <select
-                  value={formCategory}
-                  onChange={(e) => setFormCategory(e.target.value)}
+                  value={form.category}
+                  onChange={(e) => updateForm('category', e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
                 >
-                  <option value="Produce">Produce</option>
-                  <option value="Bakery">Bakery</option>
-                  <option value="Honey & Preserves">Honey & Preserves</option>
-                  <option value="Dairy & Cheese">Dairy & Cheese</option>
-                  <option value="Meats & Dairy">Meats & Dairy</option>
+                  {CATEGORY_OPTIONS.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -438,8 +450,8 @@ export default function VendorDashboard() {
                     step="0.25"
                     min="0.5"
                     required
-                    value={formPrice}
-                    onChange={(e) => setFormPrice(e.target.value)}
+                    value={form.price}
+                    onChange={(e) => updateForm('price', e.target.value)}
                     placeholder="6.50"
                     className="w-full pl-7 pr-3 py-2 rounded-xl border border-stone-300 text-xs text-[#232323] font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
                   />
@@ -453,8 +465,8 @@ export default function VendorDashboard() {
                 <input
                   type="text"
                   required
-                  value={formUnit}
-                  onChange={(e) => setFormUnit(e.target.value)}
+                  value={form.unit}
+                  onChange={(e) => updateForm('unit', e.target.value)}
                   placeholder="dozen, basket, lb, loaf"
                   className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
                 />
@@ -465,14 +477,15 @@ export default function VendorDashboard() {
                   Photo Asset Preset
                 </label>
                 <select
-                  value={formImageKey}
-                  onChange={(e) => setFormImageKey(e.target.value)}
+                  value={form.imageKey}
+                  onChange={(e) => updateForm('imageKey', e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
                 >
-                  <option value="produce">Fresh Produce Crate</option>
-                  <option value="bakery">Artisan Hearth Bread</option>
-                  <option value="preserves">Maple & Wildflower Honey</option>
-                  <option value="hero">Market Morning Stall</option>
+                  {IMAGE_OPTIONS.map((opt) => (
+                    <option key={opt.key} value={opt.key}>
+                      {opt.label}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -483,8 +496,8 @@ export default function VendorDashboard() {
               </label>
               <textarea
                 rows={2}
-                value={formDescription}
-                onChange={(e) => setFormDescription(e.target.value)}
+                value={form.description}
+                onChange={(e) => updateForm('description', e.target.value)}
                 placeholder="Where was it harvested? Variety, flavor characteristics, or preparation tips."
                 className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#2F5D3A]"
               />
@@ -501,14 +514,14 @@ export default function VendorDashboard() {
               </div>
               <button
                 type="button"
-                onClick={() => setFormIsAvailable(!formIsAvailable)}
+                onClick={() => updateForm('isAvailable', !form.isAvailable)}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  formIsAvailable ? 'bg-[#2F5D3A]' : 'bg-stone-300'
+                  form.isAvailable ? 'bg-[#2F5D3A]' : 'bg-stone-300'
                 }`}
               >
                 <span
                   className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    formIsAvailable ? 'translate-x-6' : 'translate-x-1'
+                    form.isAvailable ? 'translate-x-6' : 'translate-x-1'
                   }`}
                 />
               </button>

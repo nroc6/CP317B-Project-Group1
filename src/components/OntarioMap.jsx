@@ -5,9 +5,82 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapPin, ArrowRight, Store, Clock, Calendar, AlertTriangle } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import L from 'leaflet';
 
+// Hand-placed pin positions for the SVG fallback map (viewBox 900x550).
+const SVG_PINS = [
+  { id: 'st-jacobs', name: 'St. Jacobs', x: 420, y: 340, city: 'Woolwich' },
+  { id: 'kitchener', name: 'Kitchener', x: 435, y: 360, city: 'Kitchener' },
+  { id: 'guelph', name: 'Guelph', x: 470, y: 340, city: 'Guelph' },
+  { id: 'hamilton', name: 'Hamilton', x: 500, y: 390, city: 'Hamilton' },
+  { id: 'kensington', name: 'Kensington (Toronto)', x: 550, y: 360, city: 'Toronto' },
+  { id: 'covent-garden', name: 'Covent Garden', x: 340, y: 410, city: 'London' },
+  { id: 'peterborough', name: 'Peterborough', x: 620, y: 280, city: 'Peterborough' },
+  { id: 'byward', name: 'ByWard Market', x: 770, y: 150, city: 'Ottawa' },
+];
+
+// Brand-green teardrop pin with a shopping-bag icon, used for Leaflet markers.
+function createPinIcon() {
+  return L.divIcon({
+    className: 'basket-pin-marker',
+    html: `
+      <div style="
+        background-color: #2F5D3A;
+        color: #FAF6EE;
+        width: 34px;
+        height: 34px;
+        border-radius: 50% 50% 50% 0;
+        transform: rotate(-45deg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.25);
+        border: 2px solid #FFFFFF;
+        cursor: pointer;
+      ">
+        <svg style="transform: rotate(45deg); width: 16px; height: 16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>
+        </svg>
+      </div>
+    `,
+    iconSize: [34, 34],
+    iconAnchor: [17, 34],
+    popupAnchor: [0, -34],
+  });
+}
+
+// Creates a styled element using textContent, so market data is never parsed as HTML.
+function styledEl(tag, cssText, text) {
+  const el = document.createElement(tag);
+  el.style.cssText = cssText;
+  el.textContent = text || '';
+  return el;
+}
+
+// Builds the Leaflet popup for a market: name, city, hours, vendor count and a link.
+function buildPopupContent(market) {
+  const popup = document.createElement('div');
+  popup.className = 'p-3 max-w-[260px] text-[#232323]';
+
+  const link = styledEl(
+    'a',
+    'display: inline-flex; align-items: center; justify-content: center; width: 100%; background-color: #2F5D3A; color: #FAF6EE; padding: 6px 12px; font-size: 12px; font-weight: 600; border-radius: 6px; text-decoration: none;',
+    'View Market & Pre-Order →'
+  );
+  link.href = `/markets/${encodeURIComponent(market.id)}`;
+
+  popup.append(
+    styledEl('div', "font-family: 'Fraunces', serif; font-weight: 700; font-size: 15px; color: #2F5D3A; margin-bottom: 2px;", market.name),
+    styledEl('div', 'font-size: 11px; color: #C96F4A; font-weight: 600; text-transform: uppercase; margin-bottom: 6px;', market.city),
+    styledEl('div', 'font-size: 12px; color: #555; margin-bottom: 8px;', market.summaryHours),
+    styledEl('div', 'font-size: 11px; color: #2F5D3A; font-weight: 600; margin-bottom: 10px;', `${market.vendorCount ?? '3+'} Local Vendors Available`),
+    link
+  );
+  return popup;
+}
+
+// Market map: interactive Leaflet/OpenStreetMap view, with a hand-drawn SVG map as a fallback.
 export default function OntarioMap({ markets, selectedMarketId, onSelectMarket }) {
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -15,7 +88,7 @@ export default function OntarioMap({ markets, selectedMarketId, onSelectMarket }
   const [activeMarket, setActiveMarket] = useState(null);
   const navigate = useNavigate();
 
-  // Try initializing Leaflet Map with OpenStreetMap tiles
+  // (Re)build the Leaflet map whenever markets change; on failure, switch to the SVG map.
   useEffect(() => {
     if (useFallbackSvg) return;
     if (!mapContainerRef.current) return;
@@ -40,40 +113,14 @@ export default function OntarioMap({ markets, selectedMarketId, onSelectMarket }
         maxZoom: 18,
       });
 
+      // Tile errors are only logged; users can switch to the SVG map with the toggle.
       tileLayer.on('tileerror', () => {
-        // If tile rendering fails in sandboxed iframe, fallback cleanly
-        console.warn('Map tiles failed to load in sandbox, enabling fallback SVG map');
+        console.warn('Map tiles failed to load; the SVG region map is available via the toggle.');
       });
 
       tileLayer.addTo(map);
 
-      // Custom marker icon using Basket's deep green brand palette
-      const customPinIcon = L.divIcon({
-        className: 'basket-pin-marker',
-        html: `
-          <div style="
-            background-color: #2F5D3A;
-            color: #FAF6EE;
-            width: 34px;
-            height: 34px;
-            border-radius: 50% 50% 50% 0;
-            transform: rotate(-45deg);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.25);
-            border: 2px solid #FFFFFF;
-            cursor: pointer;
-          ">
-            <svg style="transform: rotate(45deg); width: 16px; height: 16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>
-            </svg>
-          </div>
-        `,
-        iconSize: [34, 34],
-        iconAnchor: [17, 34],
-        popupAnchor: [0, -34],
-      });
+      const customPinIcon = createPinIcon();
 
       // Add pins for each Ontario market
       markets.forEach((market) => {
@@ -86,43 +133,7 @@ export default function OntarioMap({ markets, selectedMarketId, onSelectMarket }
           if (onSelectMarket) onSelectMarket(market.id);
         });
 
-        // Popup content built via safe DOM nodes (no innerHTML interpolation)
-        const popupContent = document.createElement('div');
-        popupContent.className = 'p-3 max-w-[260px] text-[#232323]';
-
-        const titleEl = document.createElement('div');
-        titleEl.style.cssText =
-          "font-family: 'Fraunces', serif; font-weight: 700; font-size: 15px; color: #2F5D3A; margin-bottom: 2px;";
-        titleEl.textContent = market.name || '';
-
-        const cityEl = document.createElement('div');
-        cityEl.style.cssText =
-          'font-size: 11px; color: #C96F4A; font-weight: 600; text-transform: uppercase; margin-bottom: 6px;';
-        cityEl.textContent = market.city || '';
-
-        const hoursEl = document.createElement('div');
-        hoursEl.style.cssText = 'font-size: 12px; color: #555; margin-bottom: 8px;';
-        hoursEl.textContent = market.summaryHours || '';
-
-        const vendorCountText =
-          typeof market.vendorCount === 'number'
-            ? market.vendorCount
-            : market.vendorIds
-            ? market.vendorIds.length
-            : '3+';
-        const vendorsEl = document.createElement('div');
-        vendorsEl.style.cssText =
-          'font-size: 11px; color: #2F5D3A; font-weight: 600; margin-bottom: 10px;';
-        vendorsEl.textContent = `${vendorCountText} Local Vendors Available`;
-
-        const linkEl = document.createElement('a');
-        linkEl.href = `/markets/${encodeURIComponent(market.id)}`;
-        linkEl.style.cssText =
-          'display: inline-flex; align-items: center; justify-content: center; width: 100%; background-color: #2F5D3A; color: #FAF6EE; padding: 6px 12px; font-size: 12px; font-weight: 600; border-radius: 6px; text-decoration: none;';
-        linkEl.textContent = 'View Market & Pre-Order →';
-
-        popupContent.append(titleEl, cityEl, hoursEl, vendorsEl, linkEl);
-        marker.bindPopup(popupContent);
+        marker.bindPopup(buildPopupContent(market));
       });
 
       // Fit bounds if markets exist
@@ -233,18 +244,10 @@ export default function OntarioMap({ markets, selectedMarketId, onSelectMarket }
               OTTAWA RIVER
             </text>
 
-            {/* Market Pins Coordinates mapped accurately in SVG relative positions */}
-            {[
-              { id: 'st-jacobs', name: "St. Jacobs", x: 420, y: 340, city: 'Woolwich' },
-              { id: 'kitchener', name: 'Kitchener', x: 435, y: 360, city: 'Kitchener' },
-              { id: 'guelph', name: 'Guelph', x: 470, y: 340, city: 'Guelph' },
-              { id: 'hamilton', name: 'Hamilton', x: 500, y: 390, city: 'Hamilton' },
-              { id: 'kensington', name: 'Kensington (Toronto)', x: 550, y: 360, city: 'Toronto' },
-              { id: 'covent-garden', name: 'Covent Garden', x: 340, y: 410, city: 'London' },
-              { id: 'peterborough', name: 'Peterborough', x: 620, y: 280, city: 'Peterborough' },
-              { id: 'byward', name: 'ByWard Market', x: 770, y: 150, city: 'Ottawa' },
-            ].map((pin) => {
+            {/* Market pins; markets missing from the data fall back to the pin's own label */}
+            {SVG_PINS.map((pin) => {
               const market = markets.find((m) => m.id === pin.id) || {
+                id: pin.id,
                 name: pin.name,
                 city: pin.city,
                 summaryHours: 'Weekend mornings',

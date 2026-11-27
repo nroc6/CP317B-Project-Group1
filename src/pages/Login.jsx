@@ -9,6 +9,9 @@ import { ShoppingBag, Lock, Mail, ArrowRight, ShieldCheck, UserCheck, Store, Ale
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+const DEMO_PASSWORD = 'demo1234';
+
+// /login — email/password sign-in with one-click demo credentials.
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -18,8 +21,10 @@ export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Page to return to after login (set by pages that redirect here).
   const from = location.state?.from?.pathname || '/';
 
+  // Signs in, then sends vendors to their dashboard and customers back where they came from.
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (isLoading) return;
@@ -44,9 +49,10 @@ export default function Login() {
     }
   };
 
+  // Pre-fills the form with a demo account.
   const fillDemo = (demoEmail) => {
     setEmail(demoEmail);
-    setPassword('demo1234');
+    setPassword(DEMO_PASSWORD);
   };
 
   return (
